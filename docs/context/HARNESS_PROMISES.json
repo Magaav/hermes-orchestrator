@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-06",
+  "updatedAt": "2026-08-21",
   "resultStatuses": [
     "pass",
     "fail",
@@ -102,9 +102,105 @@
       ]
     },
     {
+      "id": "wasm-agent-product-readiness-contract-valid",
+      "owner": "docs/context",
+      "claim": "The cross-journey wasm-agent product-readiness schema, promise composition, canonical statuses, redaction rule, and null-for-missing metric contract are structurally valid.",
+      "whenToUse": "After changing the product-readiness evaluator, result schema, journey set, normalization rules, or aggregate promise composition.",
+      "command": [
+        "python3",
+        "tools/context/evaluate-wasm-agent-product-readiness.py",
+        "--validate-only"
+      ],
+      "timeoutSec": 20,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the versioned result schema id is wasm-agent.product-readiness.result.v1",
+        "the exact ordered journeys are repository-agent, electron-browser-agent, and android-voice-agent",
+        "every journey uses a canonical harness status and preserves typed underlying evidence",
+        "evaluationCompleted remains separate from ready",
+        "absent measurements remain null and are listed in missingMetrics",
+        "the aggregate result is redacted and stores evidence references and SHA-256 digests rather than raw logs"
+      ],
+      "outputArtifacts": [
+        "docs/context/PRODUCT_READINESS_RESULT_SCHEMA.json",
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "docs/context/PRODUCT_READINESS_RESULT_SCHEMA.json",
+        "docs/context/HARNESS_PROMISES.json",
+        "tools/context/evaluate-wasm-agent-product-readiness.py",
+        "plugins/wasm-agent/tests/product_readiness_evaluation.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first schema, registry, status, or missing-metric invariant before running a live journey.",
+        "Do not weaken required metrics to make a readiness result pass."
+      ]
+    },
+    {
+      "id": "wasm-agent-product-readiness-evaluation",
+      "owner": "docs/context",
+      "claim": "Repository, Electron/browser, and Android voice journeys are normalized from their registered proof artifacts into one compact evaluation that keeps pass, failure, stale evidence, missing metrics, and typed blockers visible.",
+      "whenToUse": "Before making a broad wasm-agent readiness claim, after refreshing any canonical journey proof, or when choosing the next reusable reliability repair.",
+      "command": [
+        "python3",
+        "tools/context/evaluate-wasm-agent-product-readiness.py"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral",
+        "production"
+      ],
+      "passRequires": [
+        "all three canonical journeys have an explicit canonical status even when runtime access or proof is missing",
+        "evidence newer than its registered invalidation sources is distinguished from historical or stale evidence",
+        "required metrics absent from child artifacts remain null and are enumerated",
+        "evaluation completion is recorded independently of product readiness",
+        "one highest-priority generic contract or evidence bottleneck is selected from the normalized results",
+        "the JSON report and concise Markdown summary are written without embedding raw logs or credentials"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/wasm-agent-product-readiness-result.json",
+        "reports/context/latest/wasm-agent-product-readiness-summary.md",
+        "reports/context/product-readiness/*.json",
+        "reports/context/product-readiness/*.md"
+      ],
+      "invalidatedBy": [
+        "docs/context/PRODUCT_READINESS_RESULT_SCHEMA.json",
+        "docs/context/HARNESS_PROMISES.json",
+        "tools/context/evaluate-wasm-agent-product-readiness.py",
+        "reports/context/latest/master-frontier-v6-live-model-result.json",
+        "reports/context/latest/production-native-control-authority.json",
+        "reports/context/latest/master-frontier-v6-client-ui.json",
+        "reports/windows/latest/hot-shell-proof-result.json",
+        "reports/android/wake-shell-v2/latest-shell-v2-wake-loop.json"
+      ],
+      "nextSuggestedSteps": [
+        "Refresh only the first stale or blocked child promise selected by highestPriorityBottleneck.",
+        "Use --run with one journey id to serialize its registered promises; do not run all stateful lanes by default.",
+        "Compare the refreshed report with the preserved baseline before claiming improvement."
+      ]
+    },
+    {
       "id": "master-frontier-v6-kernel-bounded",
       "owner": "plugins/wasm-agent/server/master_frontier/v6",
-      "claim": "Master:frontier V6 keeps the provider surface constant while capabilities scale out of prompt, exposes large untrusted evidence only through bounded lenses, runs independent work concurrently, and does not replay a completed operation after snapshot restore.",
+      "claim": "Master:frontier V6 keeps the provider surface constant while capabilities scale out of prompt, projects a complete small read once as explicitly untrusted evidence, makes generic Browser JavaScript discoverable for page actions, keeps action loops within three provider calls in the deterministic fixture, preserves goal completion across resume, keeps large evidence behind bounded lenses, host-binds client identity, runs independent work concurrently, and does not replay a completed operation after snapshot restore.",
       "whenToUse": "After changing the V6 projection, controller tools, capability catalog, evidence store, operation ledger, snapshot restore, DAG scheduler, or V5 bridge.",
       "command": [
         "python3",
@@ -124,6 +220,11 @@
       "passRequires": [
         "exactly four stable provider tools are exposed with 513 registered capabilities",
         "a 250000-character executor result is absent by default, a requested 4096-character lens stays below 12000 serialized request characters, and hostile evidence cannot spoof projection records",
+        "a complete small read is projected once as untrusted evidence and finishes the deterministic inspect fixture in three provider decisions without a detail turn",
+        "bound client capabilities expose no model-supplied client identity while the trusted bridge retains the binding",
+        "client-action completion remains blocked after observation or an unmarked setup write and clears only after a successful write receipt explicitly correlated to the goal",
+        "the deterministic Browser action fixture uses its preloaded unrestricted JavaScript capability directly, performs execute then answer with no discover turn, and completes within three provider calls",
+        "goal-correlated completion survives checkpoint restore so a continuation cannot repeat the completed action",
         "stable request records are measured as reusable on the second inference",
         "snapshot restore replays the prior receipt without invoking the executor again",
         "64 independent repository reads reach eight concurrent executors"
@@ -182,6 +283,51 @@
       "nextSuggestedSteps": [
         "Inspect diagnostics.performance.phases and provider_calls before changing architecture.",
         "Optimize the largest measured non-provider phase and rerun one production CDP turn."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-compound-client-goals",
+      "owner": "plugins/wasm-agent/server/master_frontier/v6",
+      "claim": "A completed production V6 compound client action preserves two reviewed goals and finishes only after each dynamically named operation has a capability-correlated client acknowledgement, including active-space proof for the space goal.",
+      "whenToUse": "After changing V6 goal proposal, goal audit, operation correlation, client receipts, completion gaps, terminal answer shaping, or production deployment.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-v6-compound-client-goals.py"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral",
+        "production"
+      ],
+      "passRequires": [
+        "the exact compound objective has a completed production V6 artifact with a reviewed goal contract",
+        "exactly two distinct goals cover client.space.open and client.widget.open and both are satisfied",
+        "each model-authored operation id correlates its goal, successful local tool receipt, and operation evidence without hardcoded ids",
+        "both operations contain client.ack and the space operation also contains client.space.active",
+        "the run has zero completion gaps, a nonempty terminal reply, and exactly three provider calls",
+        "synthetic positive and missing-receipt negative controls pass"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v6-compound-client-goals.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/server/master_frontier/v6/**",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py",
+        "tools/context/prove-master-frontier-v6-compound-client-goals.py",
+        "production deployment or installed Electron runtime change"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the first false check and its capability-correlated goal proof before changing prompts or retrying.",
+        "Run a new explicitly authorized production compound action when the stored artifact is invalidated; the promise itself is read-only."
       ]
     },
     {
@@ -310,6 +456,7 @@
         "plugins/wasm-agent/server/live_clients.py",
         "plugins/wasm-agent/server/master_frontier/**",
         "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/public/modules/master-frontier/useful-fallback.js",
         "plugins/wasm-agent/public/modules/client-presence.js",
         "plugins/wasm-agent/server/static_server.py",
         "tools/context/prove-master-frontier-v6-client-ui.py",
@@ -318,6 +465,133 @@
       "nextSuggestedSteps": [
         "Inspect upstreamError, the selected client manifest, and the exact command artifact before changing prompts or retrying.",
         "Treat a blank or missing client capability list as no authority; never restore runtime-type defaults or union sibling-client capabilities."
+      ]
+    },
+    {
+      "id": "windows-native-browser-input-receipt-source",
+      "owner": "native/windows",
+      "claim": "The disabled-by-default Electron Browser Agent can explicitly enable one fresh redacted native primary-gesture receipt, optionally exercise it through one bounded synthetic dispatch, and inspect only truthful pre-dispatch evidence on demand.",
+      "whenToUse": "After changing native web-surface input enablement, pre-dispatch capture, timer expiry, bounds validation, receipt redaction, Browser Agent control, observability projection, preload wiring, or the Browser widget native contract.",
+      "command": [
+        "bash",
+        "-lc",
+        "npm --prefix native/windows/src run test:web-surfaces && node --input-type=module --check < plugins/wasm-agent/public/modules/browser/browser.entry.js && node --experimental-vm-modules plugins/wasm-agent/public/modules/client-observability.test.mjs && node --experimental-vm-modules plugins/wasm-agent/public/modules/client-presence.test.mjs && node plugins/wasm-agent/tests/browser_widget_native_contract.test.mjs && python3 plugins/wasm-agent/tests/live_clients.test.py && python3 plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_contracts.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_controller.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py && python3 plugins/wasm-agent/tests/master_frontier_route_contracts.test.py && python3 plugins/wasm-agent/tests/client_first_cloud.test.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "input receipt capture is disabled by default and only native input-receipt with an explicit enabled boolean changes that state; disabling clears pending input, the receipt, and its expiry timer",
+        "the renderer advertises receipt enablement and pointer dispatch only after one native capability probe confirms each installed-shell primitive, and remote open_widget is idempotent for an already-open Browser",
+        "surface status and pointer admission derive readiness from the same current loading, error, and URL state, while superseded avatar-overlay snapshot work schedules a latest geometry reconciliation instead of leaving stale suppression state",
+        "while enabled, Electron before-mouse-event creates a receipt only after matching left mouseDown and mouseUp on the same current main document and rejects right, middle, incomplete, blurred, navigated, or out-of-bounds input",
+        "the manifest limits each surface to one in-memory receipt and every accepted gesture replaces it with a real overwrite-safe inputReceiptTtlMs 120000 timer so an older timer cannot clear a newer receipt",
+        "normal status omits receipt state while status with includeInputReceipt true returns inputReceiptEnabled plus inputReceipt as null or one hermes.wasm_agent.native_web_surface_input_receipt.v1 object",
+        "the receipt action is pointer.primary_gesture and outcome is observed_pre_dispatch, proving only native pre-dispatch observation and never a click, DOM dispatch, target activation, or page success",
+        "pointer dispatch accepts one in-bounds integer coordinate pair only while the surface is visible, ready, and receipt-enabled; dispatch acceptance remains separate from independently observed receipt evidence",
+        "synthetic command-correlated receipts are labeled electron_synthetic while all other accepted native gestures are labeled unattributed_native_input; neither source is described as proof of a physical user click",
+        "the receipt is redacted and bounded to identity, time, action, outcome, left button, current-document state, age, and validated coordinates and viewport without a selector, DOM target, page content, form value, or raw Electron event",
+        "capture and disclosure add no page JavaScript, polling loop, renderer push, or persistence",
+        "the Browser Agent button invokes native input-receipt with explicit enabled state and the on-demand observability projection accepts only a valid enabled fresh receipt without placing it in always-on model context or the persisted interaction trail",
+        "the Browser wiring still packages and exposes the native web-surface manager contract"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "native/windows/src/main/web-surfaces/capability-manifest.json",
+        "native/windows/src/main/web-surfaces/manager.js",
+        "native/windows/src/main/web-surfaces/manager.test.js",
+        "native/windows/src/preload.js",
+        "plugins/wasm-agent/public/modules/client-observability.js",
+        "plugins/wasm-agent/public/modules/client-observability.test.mjs",
+        "plugins/wasm-agent/public/modules/browser/browser.entry.js",
+        "plugins/wasm-agent/public/modules/browser/module.js",
+        "plugins/wasm-agent/public/modules/app-registry.js",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/modules/client-presence.js",
+        "plugins/wasm-agent/public/modules/client-presence.test.mjs",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/server/master_frontier/v6/adapters.py",
+        "plugins/wasm-agent/server/master_frontier/v6/v5_bridge.py",
+        "plugins/wasm-agent/server/live_clients.py",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_controller.test.py",
+        "plugins/wasm-agent/tests/browser_widget_native_contract.test.mjs"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first enablement, pre-dispatch, bounds, timer, redaction, projection, or wiring assertion before changing the receipt schema or TTL.",
+        "Treat a source pass as source evidence only; prove dispatch acceptance and an independently observed synthetic receipt in the final NSIS-installed Electron app before making a synthetic runtime claim.",
+        "A physical-user-click claim still requires one fresh human gesture after receipt mode is enabled; never promote a synthetic or unattributed receipt into physical proof."
+      ]
+    },
+    {
+      "id": "master-frontier-full-power-client-source",
+      "owner": "plugins/wasm-agent+native/windows",
+      "claim": "An authenticated Master:frontier run can inspect or mutate an installed Electron Browser surface with separate proof-bound semantic capabilities over arbitrary JavaScript, and execute arbitrary PowerShell or CMD under the installed Windows app user token through explicit capability-selected, audited client commands.",
+      "whenToUse": "After changing unrestricted Browser JavaScript, Windows-user shell execution, renderer command polling, live-client registries, Master:frontier client actions, capability selection, packaging, or installer verification.",
+      "command": [
+        "bash",
+        "-lc",
+        "npm --prefix native/windows/src run test:web-surfaces && npm --prefix native/windows/src run test:installed-proof && node --experimental-vm-modules plugins/wasm-agent/public/modules/client-presence.test.mjs && node plugins/wasm-agent/tests/browser_widget_native_contract.test.mjs && python3 plugins/wasm-agent/tests/live_clients.test.py && python3 plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_contracts.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_controller.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py && python3 plugins/wasm-agent/tests/master_frontier_route_contracts.test.py && node --check native/windows/src/main.js && node --check native/windows/scripts/verify-windows-installer.js"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "Browser JavaScript accepts arbitrary source without semantic allowlisting and evaluates it in the selected native page main world through one existing web-surface invoke",
+        "read-only Browser JavaScript requires a typed bounded scalar observation and cannot satisfy the separate mutation capability's changed-postcondition proof",
+        "Windows execution accepts arbitrary PowerShell or CMD without a command allowlist and runs with the installed app process token rather than claiming elevation",
+        "payload, output, environment-count, and timeout limits bound transport and observability costs without restricting command semantics",
+        "the renderer advertises each authority only after the installed native manifest or bridge reports the exact capability",
+        "Master:frontier selects a client with the exact required capability, validates the transport envelope, queues one command, and returns command-correlated proof",
+        "the final-installer verifier requires exact extracted/source full-power module parity plus the Browser JavaScript and Windows shell capability symbols"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "native/windows/src/main/full-power-executor.js",
+        "native/windows/src/main/full-power-executor.test.js",
+        "native/windows/src/main/web-surfaces/capability-manifest.json",
+        "native/windows/src/main/web-surfaces/manager.js",
+        "native/windows/src/main/web-surfaces/manager.test.js",
+        "native/windows/src/main.js",
+        "native/windows/src/electron-builder.json",
+        "native/windows/scripts/verify-windows-installer.js",
+        "plugins/wasm-agent/public/modules/client-presence.js",
+        "plugins/wasm-agent/public/modules/client-presence.test.mjs",
+        "plugins/wasm-agent/server/live_clients.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/server/master_frontier/v5/policy.py",
+        "plugins/wasm-agent/server/master_frontier/v6/adapters.py",
+        "plugins/wasm-agent/server/master_frontier/v6/v5_bridge.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json",
+        "plugins/wasm-agent/tests/live_clients.test.py",
+        "plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py",
+        "plugins/wasm-agent/tests/browser_widget_native_contract.test.mjs"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first execution, capability-selection, command-correlation, packaging, or extracted-source parity assertion before rebuilding.",
+        "Treat a source pass as source evidence only; require final extracted NSIS verification and harmless command receipts from the installed Electron Browser and Windows bridge before claiming runtime authority."
       ]
     },
     {
@@ -1339,7 +1613,7 @@
         "canary hot operation returns success"
       ],
       "outputArtifacts": [
-        "reports/windows/latest/hot-shell-proof.json"
+        "reports/windows/latest/hot-shell-proof-result.json"
       ],
       "invalidatedBy": [
         "native/windows/**",
@@ -1350,6 +1624,80 @@
       "nextSuggestedSteps": [
         "If bridge_update_required or hot_operation_missing appears, fix bridge/hot-op loading before blaming Android runtime.",
         "If the installed app is absent, install the feed-published shell first."
+      ]
+    },
+    {
+      "id": "windows-audio-loopback-route",
+      "owner": "native/windows",
+      "claim": "The installed Windows bridge exposes a ready default loopback recording input for deterministic browser_speech testing.",
+      "whenToUse": "Before sending Windows synthesized speech into a browser transcription flow or after changing Windows audio endpoints, defaults, the loopback probe hot operation, or its release-feed bundle.",
+      "command": [
+        "python3",
+        "tools/windows/prove-audio-loopback.py",
+        "--origin",
+        "https://wa.colmeio.com"
+      ],
+      "timeoutSec": 60,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the installed Windows bridge is reachable through the production origin",
+        "the SHA-verified inspect_windows_audio_loopback hot operation runs from the downloaded or bundled operation root",
+        "the bounded AudioEndpoint inventory completes without timeout or invalid output",
+        "at least one capture endpoint is classified as a ready loopback candidate",
+        "the current default recording device matches a ready loopback candidate"
+      ],
+      "outputArtifacts": [
+        "reports/windows/latest/audio-loopback-proof.json"
+      ],
+      "invalidatedBy": [
+        "native/windows/ops/audio/**",
+        "tools/windows/prove-audio-loopback.py",
+        "plugins/wasm-agent/scripts/generate-native-release-feed.js",
+        "plugins/wasm-agent/public/native/releases/latest.json",
+        "installed Windows audio endpoint or default-device change",
+        "installed Windows app update",
+        "audio hot-op bundle SHA change"
+      ],
+      "nextSuggestedSteps": [
+        "If a ready loopback exists but is not default, change the recording default only with explicit user authorization and then rerun this promise.",
+        "If a loopback endpoint is disabled, enable that existing device before considering a new driver.",
+        "If no loopback endpoint exists, stop with audio_loopback_device_missing before installing third-party software."
+      ]
+    },
+    {
+      "id": "windows-audio-loopback-signal",
+      "owner": "native/windows",
+      "claim": "Synthesized speech produces measurable samples on the default Windows capture endpoint.",
+      "whenToUse": "After the loopback route promise passes but browser speech still reports no-speech.",
+      "command": ["python3", "tools/windows/prove-audio-signal.py", "--origin", "https://wa.colmeio.com"],
+      "timeoutSec": 60,
+      "cost": {"tokenCost":"tiny","runtimeCost":"medium","rebuildCost":"none","confidence":"high"},
+      "evidenceClasses": ["runtime", "behavioral"],
+      "passRequires": [
+        "the installed Windows bridge is reachable through the production origin",
+        "the SHA-verified probe_windows_audio_signal hot operation runs",
+        "peak is at least 0.01 and RMS is at least 0.001 during the bounded synthesized phrase"
+      ],
+      "outputArtifacts": ["reports/windows/latest/audio-signal-proof.json"],
+      "invalidatedBy": [
+        "native/windows/ops/audio/**",
+        "tools/windows/prove-audio-signal.py",
+        "plugins/wasm-agent/public/native/releases/latest.json",
+        "installed Windows audio endpoint or default-device change",
+        "audio hot-op bundle SHA change"
+      ],
+      "nextSuggestedSteps": [
+        "If silent, inspect or pin the render path feeding VB-CABLE before testing browser transcription.",
+        "If signal passes but browser speech reports no-speech, inspect the browser recognition/provider layer."
       ]
     },
     {
@@ -1733,6 +2081,46 @@
       "nextSuggestedSteps": [
         "If exact and estimated usage are mixed, split the fields before exposing totals.",
         "If a provider omits usage, store estimated values only under estimated fields and mark exact false."
+      ]
+    },
+    {
+      "id": "master-frontier-session-status-telemetry",
+      "owner": "plugins/wasm-agent/public/modules/master-frontier",
+      "claim": "Master:frontier status shows the latest active prompt usage while monotonically retaining the last provider-reported context window and seven-day allowance across incomplete or interrupted turns in the same session.",
+      "whenToUse": "After changing provider status metadata, token-ledger refresh, session diagnostics, status-panel projection, or interrupted-turn rendering.",
+      "command": [
+        "node",
+        "--test",
+        "plugins/wasm-agent/public/modules/master-frontier/status-panel.test.mjs"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "behavioral"
+      ],
+      "passRequires": [
+        "active context usage comes from the newest prompt rather than cumulative session tokens",
+        "a later incomplete turn cannot replace a previously reported context window with unknown",
+        "a later incomplete turn cannot replace a previously reported seven-day allowance with unknown",
+        "the UI does not invent limits when no turn in the session has provider-reported telemetry"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/public/modules/master-frontier/status-panel.js",
+        "plugins/wasm-agent/public/modules/master-frontier/status-panel.test.mjs",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/server/master_frontier/token_ledger.py"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first active-context, carry-forward, or no-invention assertion before changing display copy.",
+        "Use a live provider run only after the deterministic session merge passes."
       ]
     },
     {
@@ -2598,6 +2986,10 @@
         "plugins/wasm-agent/server/master_frontier/planner.py",
         "plugins/wasm-agent/server/master_frontier/trace.py",
         "plugins/wasm-agent/server/master_frontier/token_ledger.py",
+        "labs/wasm-agent/codex_conversation_state.py",
+        "labs/wasm-agent/codex_subscription_provider.py",
+        "labs/wasm-agent/test_codex_conversation_state.py",
+        "labs/wasm-agent/test_codex_subscription_provider.py",
         "plugins/wasm-agent/public/modules/master-frontier/cyphers-v3.json",
         "plugins/wasm-agent/public/modules/master-frontier/useful-fallback.js",
         "plugins/wasm-agent/tests/master_frontier_session_replay.test.py"
@@ -3123,8 +3515,9 @@
       "claim": "Persisted open external widgets stay hidden until their lazy content remounts after reload, then become visible without an empty shell.",
       "whenToUse": "After changing external app hosts, widget visibility, saved layout hydration, lazy module mounting, or when an open widget reloads with an empty body.",
       "command": [
-        "node",
-        "plugins/wasm-agent/public/modules/app-registry.test.mjs"
+        "bash",
+        "-lc",
+        "node plugins/wasm-agent/public/modules/app-registry.test.mjs && node plugins/wasm-agent/public/modules/space-widget-policy.test.mjs"
       ],
       "timeoutSec": 20,
       "cost": {
@@ -3142,6 +3535,7 @@
         "only persisted open external apps are selected for hydration",
         "mounting is deduplicated and failed mounts remain hidden with bounded diagnostics",
         "successful mounts remove the unmounted state before one final layout pass",
+        "an explicitly open unpositioned widget remains open across layout synchronization while ambiguous unpositioned legacy state closes",
         "closing restores the unmounted state and releases the module lifecycle"
       ],
       "outputArtifacts": [
@@ -3151,6 +3545,8 @@
         "plugins/wasm-agent/public/app.js",
         "plugins/wasm-agent/public/modules/app-registry.js",
         "plugins/wasm-agent/public/modules/app-registry.test.mjs",
+        "plugins/wasm-agent/public/modules/space-widget-policy.js",
+        "plugins/wasm-agent/public/modules/space-widget-policy.test.mjs",
         "plugins/wasm-agent/public/modules/widget-window-state.js"
       ],
       "nextSuggestedSteps": [
@@ -3196,6 +3592,234 @@
       ],
       "nextSuggestedSteps": [
         "Inspect the terminal run ledger and first unmet completion requirement before changing budgets or rerunning."
+      ]
+    },
+    {
+      "id": "production-native-control-authority",
+      "owner": "native/windows",
+      "claim": "Native-control reachability and target selection come from the authenticated production client registry, never from a repository-local heartbeat mirror.",
+      "whenToUse": "Before concluding that an open WASM Agent is disconnected, queueing restart/install commands, or selecting a Windows/Electron device id.",
+      "command": [
+        "python3",
+        "tools/context/prove-production-native-control-authority.py"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "production"
+      ],
+      "passRequires": [
+        "the authenticated production /native/control/clients endpoint responds without exposing its credential",
+        "at least one Electron client is live with age_sec at most 90",
+        "the report labels plugins/wasm-agent/state/native-control/heartbeats as a non-authoritative mirror",
+        "device selection records the production device id, route, build id, transport, age, and advertised capabilities"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/production-native-control-authority.json",
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/live_clients.py",
+        "plugins/wasm-agent/server/native_control_auth.py",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/public/modules/client-presence.js",
+        "native/windows/src/main.js",
+        "tools/context/prove-production-native-control-authority.py"
+      ],
+      "nextSuggestedSteps": [
+        "If production is live but the local mirror is stale, use the production IDs and do not diagnose a disconnected bridge.",
+        "If production has no live Electron client, repair polling or direct Windows process access before queueing delayed destructive commands."
+      ]
+    },
+    {
+      "id": "windows-installed-package-proof-source",
+      "owner": "native/windows",
+      "claim": "The Windows shell observes the real packaged app.asar through Electron original-fs, projects only bounded expected-hash evidence, and exposes redacted durable-session metadata without cookie values.",
+      "whenToUse": "After changing installed app.asar hashing, runtime package metadata, native session proof projection, installed verification results, or final-installer proof assertions.",
+      "command": [
+        "bash",
+        "-lc",
+        "npm --prefix native/windows/src run test:installed-proof && node --check native/windows/src/main.js && node --check native/windows/scripts/verify-windows-installer.js"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "installed package observation resolves only resources/app.asar and fails closed when Electron original-fs is unavailable",
+        "the raw archive hash and size are memoized once per process and development source files cannot qualify as packaged proof",
+        "the bounded installed-package projection distinguishes observed bytes from an exact expected-SHA match and emits no filesystem path",
+        "the native cookie-session summary emits counts and expiration bounds without cookie names, values, paths, or raw domains",
+        "the final-installer verifier requires exact extracted/source module parity and executes the packaged integrity module against the independently hashed extracted app.asar"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "native/windows/src/main/package-integrity.js",
+        "native/windows/src/main/package-integrity.test.js",
+        "native/windows/src/main/native-session-proof.js",
+        "native/windows/src/main/native-session-proof.test.js",
+        "native/windows/src/main.js",
+        "native/windows/src/electron-builder.json",
+        "native/windows/src/package.json",
+        "native/windows/scripts/verify-windows-installer.js"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first raw-archive, memoization, projection, redaction, packaging, or extracted-module parity assertion before rebuilding.",
+        "Treat this as source evidence only; require final extracted NSIS verification and a matching installed runtime projection before claiming installed package identity."
+      ]
+    },
+    {
+      "id": "master-frontier-active-space-production-proof",
+      "owner": "plugins/wasm-agent+tools/context",
+      "claim": "A production Master:frontier turn names the active Electron space only from semantic client-inspection evidence, persists the same space identity at ingress, reports provider context-window and seven-day telemetry, and terminates with no completion gaps.",
+      "whenToUse": "After changing active-space client presence, live-client projection, direct-envelope run context, client inspection, V6 evidence/completion gates, or provider status telemetry.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-active-space.py"
+      ],
+      "timeoutSec": 180,
+      "cost": {
+        "tokenCost": "large",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the live Electron heartbeat exposes bounded space_id and space_name fields",
+        "client.inspect returns that semantic identity rather than requiring URL inference",
+        "the persisted request summary retains the exact active-space id and name",
+        "the final answer names Realure and cites inspected space_name plus the exact route id",
+        "provider telemetry reports a positive context window and a typed seven-day allowance",
+        "the persisted run is terminal completed with successful inspect evidence and no completion gaps"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-active-space-proof.json",
+        "persisted agent run and event rows"
+      ],
+      "invalidatedBy": [
+        "tools/context/prove-master-frontier-active-space.py",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/modules/client-presence.js",
+        "plugins/wasm-agent/public/modules/master-frontier/status-panel.js",
+        "plugins/wasm-agent/server/live_clients.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/server/static_server.py",
+        "plugins/wasm-agent/server/master_frontier/v6/**",
+        "production deployment or live Electron client change"
+      ],
+      "nextSuggestedSteps": [
+        "Treat any failed check as a claim blocker and inspect the persisted run before changing prompts.",
+        "Rerun the unchanged production proof after repairing the owning ingress, inspection, telemetry, or completion contract."
+      ]
+    },
+    {
+      "id": "master-frontier-client-action-simulation",
+      "owner": "plugins/wasm-agent",
+      "claim": "A greeting-prefixed Avatar Chat request to open an authenticated app space is classified as a client action, exposes the generic space-open capability, executes it through the live-client command contract, receives active-space proof, and answers only after acknowledgement.",
+      "whenToUse": "After changing Master:frontier client-action intent, authority, capability compilation, live-client commands, space navigation, completion gates, or final action answers.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "behavioral",
+        "runtime"
+      ],
+      "passRequires": [
+        "the exact fixture input `hello open realure space` enters the client_action lane",
+        "the simulated live Electron manifest exposes client.space.open",
+        "the model-led loop executes space_open with the exact Realure reference",
+        "the correlated client result contains client.space.active proof",
+        "route resolution precedes inference, command start precedes evidence, and evidence precedes the final answer"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/intent.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/server/master_frontier/v6/**",
+        "plugins/wasm-agent/public/modules/client-presence.js",
+        "plugins/wasm-agent/public/modules/space-control.js",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first failed classification, capability, command, evidence, or ordering assertion before claiming the action works.",
+        "After the simulation passes, run the unchanged request against a deployed live Electron client for production proof."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-persisted-stall-fixture",
+      "owner": "plugins/wasm-agent/server/master_frontier+tools/context",
+      "claim": "An explicitly authorized production Chrome client can inject one bounded V6 semantic-stall fixture through the normal Frontier stream, persist its run and timeline, render the concrete missing requirement, and consume no provider call or token.",
+      "whenToUse": "After changing V6 stall detection, error persistence, stream diagnostics, client fallback rendering, or run timeline behavior.",
+      "command": [
+        "node",
+        "tools/context/inject-master-frontier-v6-stall.js",
+        "http://127.0.0.1:9222"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral",
+        "production"
+      ],
+      "passRequires": [
+        "the authorized CDP target is a wa.colmeio.com page and the agent controls are idle",
+        "exactly one Frontier request receives debug_fixture=v6_no_semantic_progress and window.fetch is restored",
+        "the visible answer reports Unresolved requirements: completion:repo.read and no run remains pending",
+        "the persisted V6 run is interrupted with phase=debug_fixture and missing=[completion:repo.read]",
+        "the timeline contains gate.decision followed by run.error",
+        "the provider token ledger records zero calls and zero tokens"
+      ],
+      "outputArtifacts": [
+        "command stdout",
+        "persisted agent run and event rows"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/server/master_frontier/v6/controller.py",
+        "plugins/wasm-agent/public/modules/master-frontier/useful-fallback.js",
+        "plugins/wasm-agent/public/app.js",
+        "tools/context/inject-master-frontier-v6-stall.js",
+        "production deployment or live Chrome client change"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the first missing persisted event or fallback assertion before changing the fixture contract.",
+        "Treat unavailable CDP or a non-admin client as blocked rather than weakening authorization."
       ]
     },
     {

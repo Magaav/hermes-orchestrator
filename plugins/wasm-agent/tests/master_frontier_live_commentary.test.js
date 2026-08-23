@@ -101,6 +101,7 @@ assert.equal(
 const appJs = fs.readFileSync(appPath, "utf8");
 assert(appJs.includes('from "./modules/master-frontier/live-commentary.js?v=20260803-codex-commentary1"'));
 assert(appJs.includes("masterFrontierCommentaryFromAction(normalized)"));
+assert(appJs.indexOf("isAgentTimelineAction(nextAction)") < appJs.indexOf("masterFrontierCommentaryFromAction(normalized)"), "timeline classification remains the routing gate for public commentary");
 assert(!appJs.includes("function agentLiveStepFromAction("), "live commentary policy must stay out of the frozen app monolith");
 
 console.log("master_frontier_live_commentary.test.js: ok");

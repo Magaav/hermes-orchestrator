@@ -65,7 +65,14 @@ export function isMasterFrontierTimelineAction(action = {}) {
   const eventType = cleanTimelineValue(action.event_type);
   const topic = cleanTimelineValue(action.topic);
   const kind = cleanTimelineValue(action.kind);
+  const commentary = action.arguments?.commentary;
   if (label === "bridge.run.poll" || id === "bridge_run_poll") return false;
+  if (
+    eventType === "llm.reason.summary"
+    && commentary?.schema === "master.frontier.v6.commentary.v1"
+    && commentary?.authored_by === "model"
+    && commentary?.visibility === "public"
+  ) return false;
   if (topic === "run-api" && ["tool", "trace", "policy"].includes(kind) && !eventType) return false;
   if (id === "tokens_used" || id === "bridge_token_usage") return true;
   if (isMasterFrontierTimelineEventType(eventType) || isMasterFrontierTimelineEventType(label)) return true;

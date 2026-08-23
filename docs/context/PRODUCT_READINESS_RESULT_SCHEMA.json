@@ -1,0 +1,882 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "wasm-agent.product-readiness.result.v1",
+  "title": "WASM Agent Product Readiness Result v1",
+  "description": "Compact, redacted, evidence-bound result for the three canonical wasm-agent product journeys. Missing measurements are null and named in missingMetrics; absence must never be interpreted as zero or success.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "runId",
+    "status",
+    "evaluationCompleted",
+    "ready",
+    "redacted",
+    "startedAt",
+    "finishedAt",
+    "durationMs",
+    "source",
+    "journeys",
+    "evidence",
+    "summary"
+  ],
+  "properties": {
+    "schema": {
+      "const": "wasm-agent.product-readiness.result.v1"
+    },
+    "runId": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "status": {
+      "$ref": "#/$defs/status"
+    },
+    "evaluationCompleted": {
+      "type": "boolean",
+      "description": "True when every canonical journey reached a final result, including a typed blocked or unavailable result. This is independent from product readiness."
+    },
+    "ready": {
+      "type": "boolean",
+      "description": "True only when all three canonical journeys pass their declared evidence gates."
+    },
+    "redacted": {
+      "const": true
+    },
+    "startedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "finishedAt": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "format": "date-time"
+    },
+    "durationMs": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "journeys": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository-agent",
+        "electron-browser-agent",
+        "android-voice-agent"
+      ],
+      "properties": {
+        "repository-agent": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/journey"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "repository-agent"
+                },
+                "metrics": {
+                  "properties": {
+                    "voice": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "electron-browser-agent": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/journey"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "electron-browser-agent"
+                },
+                "metrics": {
+                  "properties": {
+                    "voice": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "android-voice-agent": {
+          "allOf": [
+            {
+              "$ref": "#/$defs/journey"
+            },
+            {
+              "properties": {
+                "id": {
+                  "const": "android-voice-agent"
+                },
+                "metrics": {
+                  "properties": {
+                    "voice": {
+                      "$ref": "#/$defs/voiceMetrics"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/evidenceRef"
+      }
+    },
+    "summary": {
+      "type": "string",
+      "maxLength": 1200
+    },
+    "registry": {
+      "type": "object"
+    },
+    "counts": {
+      "type": "object"
+    },
+    "execution": {
+      "type": "array"
+    },
+    "highestPriorityBottleneck": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "comparison": {
+      "type": [
+        "object",
+        "null"
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "evaluationCompleted": {
+            "const": false
+          }
+        },
+        "required": [
+          "evaluationCompleted"
+        ]
+      },
+      "then": {
+        "properties": {
+          "ready": {
+            "const": false
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "evaluationCompleted": {
+            "const": true
+          }
+        },
+        "required": [
+          "evaluationCompleted"
+        ]
+      },
+      "then": {
+        "properties": {
+          "finishedAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "journeys": {
+            "properties": {
+              "repository-agent": {
+                "properties": {
+                  "status": {
+                    "not": {
+                      "const": "running"
+                    }
+                  }
+                }
+              },
+              "electron-browser-agent": {
+                "properties": {
+                  "status": {
+                    "not": {
+                      "const": "running"
+                    }
+                  }
+                }
+              },
+              "android-voice-agent": {
+                "properties": {
+                  "status": {
+                    "not": {
+                      "const": "running"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "ready": {
+            "const": true
+          }
+        },
+        "required": [
+          "ready"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evaluationCompleted": {
+            "const": true
+          },
+          "status": {
+            "const": "pass"
+          },
+          "journeys": {
+            "properties": {
+              "repository-agent": {
+                "properties": {
+                  "status": {
+                    "const": "pass"
+                  }
+                }
+              },
+              "electron-browser-agent": {
+                "properties": {
+                  "status": {
+                    "const": "pass"
+                  }
+                }
+              },
+              "android-voice-agent": {
+                "properties": {
+                  "status": {
+                    "const": "pass"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "pass"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "evaluationCompleted": {
+            "const": true
+          },
+          "ready": {
+            "const": true
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "status": {
+      "type": "string",
+      "enum": [
+        "pass",
+        "fail",
+        "running",
+        "blocked",
+        "stale",
+        "inconclusive",
+        "invalid-environment",
+        "needs-human-proof"
+      ]
+    },
+    "verificationLevel": {
+      "type": "string",
+      "enum": [
+        "production-runtime",
+        "local-runtime",
+        "installed-device-runtime",
+        "historical",
+        "local",
+        "implemented-unverified",
+        "blocked",
+        "unknown"
+      ]
+    },
+    "nullableCount": {
+      "type": [
+        "integer",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "nullableDuration": {
+      "type": [
+        "number",
+        "null"
+      ],
+      "minimum": 0
+    },
+    "nullableBoolean": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "metricNames": {
+      "type": "array",
+      "maxItems": 96,
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z][A-Za-z0-9]*(\\.[a-z][A-Za-z0-9]*)*$"
+      }
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "revision",
+        "dirty",
+        "fingerprint",
+        "capturedAt"
+      ],
+      "properties": {
+        "revision": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "dirty": {
+          "type": "boolean"
+        },
+        "fingerprint": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "capturedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ref",
+        "sha256",
+        "class",
+        "freshness"
+      ],
+      "properties": {
+        "ref": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "sha256": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "class": {
+          "type": "string",
+          "enum": [
+            "static",
+            "runtime",
+            "behavioral",
+            "package",
+            "production",
+            "human"
+          ]
+        },
+        "freshness": {
+          "type": "string",
+          "enum": [
+            "fresh",
+            "stale",
+            "unknown"
+          ]
+        },
+        "observedAt": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "promiseId": {
+          "type": "string"
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "observedStatus": {
+          "$ref": "#/$defs/status"
+        },
+        "failureClass": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "invalidatedByPaths": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "summary": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 320
+        }
+      }
+    },
+    "blocker": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "kind",
+        "failureClass",
+        "stage",
+        "prerequisite",
+        "nextAction"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "missing-access",
+            "missing-primitive",
+            "missing-observability",
+            "invalid-environment",
+            "needs-human-proof",
+            "stale-evidence",
+            "authority-boundary"
+          ]
+        },
+        "failureClass": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+        },
+        "stage": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "prerequisite": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        },
+        "nextAction": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 400
+        }
+      }
+    },
+    "evidenceCompleteness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "requiredCount",
+        "measuredCount",
+        "ratio",
+        "complete"
+      ],
+      "properties": {
+        "requiredCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "measuredCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "ratio": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      }
+    },
+    "exactTokenUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "exact",
+        "inputTokens",
+        "outputTokens",
+        "totalTokens"
+      ],
+      "properties": {
+        "exact": {
+          "const": true
+        },
+        "inputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "outputTokens": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0
+        },
+        "totalTokens": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "voiceMetrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "positiveTrialCount",
+        "negativeTrialCount",
+        "duplicateWakeCount",
+        "falseWakeCount",
+        "requestedWakeThreshold",
+        "effectiveWakeThreshold",
+        "responsivenessHealthy",
+        "wakeToAvatarMs",
+        "wakeToListeningMs",
+        "transcriptionMs",
+        "routingMs",
+        "acknowledgementMs"
+      ],
+      "properties": {
+        "positiveTrialCount": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "negativeTrialCount": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "duplicateWakeCount": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "falseWakeCount": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "requestedWakeThreshold": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "effectiveWakeThreshold": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 1
+        },
+        "responsivenessHealthy": {
+          "$ref": "#/$defs/nullableBoolean"
+        },
+        "wakeToAvatarMs": {
+          "$ref": "#/$defs/nullableDuration"
+        },
+        "wakeToListeningMs": {
+          "$ref": "#/$defs/nullableDuration"
+        },
+        "transcriptionMs": {
+          "$ref": "#/$defs/nullableDuration"
+        },
+        "routingMs": {
+          "$ref": "#/$defs/nullableDuration"
+        },
+        "acknowledgementMs": {
+          "$ref": "#/$defs/nullableDuration"
+        }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "durationMs",
+        "stageLatenciesMs",
+        "providerCalls",
+        "exactTokenUsage",
+        "retryCount",
+        "restartRecoverySucceeded",
+        "incorrectActionCount",
+        "unauthorizedActionCount",
+        "humanInterventionCount",
+        "evidenceCompleteness",
+        "voice",
+        "missingMetrics",
+        "notApplicableMetrics"
+      ],
+      "properties": {
+        "durationMs": {
+          "$ref": "#/$defs/nullableDuration"
+        },
+        "stageLatenciesMs": {
+          "type": "object",
+          "maxProperties": 32,
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_.:-]{1,96}$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/nullableDuration"
+          }
+        },
+        "providerCalls": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "exactTokenUsage": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/exactTokenUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "retryCount": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "restartRecoverySucceeded": {
+          "$ref": "#/$defs/nullableBoolean"
+        },
+        "incorrectActionCount": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "unauthorizedActionCount": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "humanInterventionCount": {
+          "$ref": "#/$defs/nullableCount"
+        },
+        "clientAcknowledged": {
+          "$ref": "#/$defs/nullableBoolean"
+        },
+        "commandReceiptVerified": {
+          "$ref": "#/$defs/nullableBoolean"
+        },
+        "evidenceCompleteness": {
+          "$ref": "#/$defs/evidenceCompleteness"
+        },
+        "voice": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/voiceMetrics"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "missingMetrics": {
+          "$ref": "#/$defs/metricNames"
+        },
+        "notApplicableMetrics": {
+          "$ref": "#/$defs/metricNames"
+        }
+      }
+    },
+    "journey": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "id",
+        "owner",
+        "status",
+        "verificationLevel",
+        "failureStage",
+        "failureClass",
+        "blocker",
+        "metrics",
+        "evidence",
+        "requiredMetrics",
+        "measuredMetrics",
+        "summary"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 160
+        },
+        "status": {
+          "$ref": "#/$defs/status"
+        },
+        "verificationLevel": {
+          "$ref": "#/$defs/verificationLevel"
+        },
+        "failureStage": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "maxLength": 128
+        },
+        "failureClass": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+        },
+        "blocker": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/blocker"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "metrics": {
+          "$ref": "#/$defs/metrics"
+        },
+        "evidence": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "$ref": "#/$defs/evidenceRef"
+          }
+        },
+        "requiredMetrics": {
+          "$ref": "#/$defs/metricNames"
+        },
+        "measuredMetrics": {
+          "$ref": "#/$defs/metricNames"
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 600
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "pass"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "failureStage": {
+                "type": "null"
+              },
+              "failureClass": {
+                "type": "null"
+              },
+              "blocker": {
+                "type": "null"
+              },
+              "metrics": {
+                "properties": {
+                  "evidenceCompleteness": {
+                    "properties": {
+                      "complete": {
+                        "const": true
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": [
+                  "blocked",
+                  "stale",
+                  "invalid-environment",
+                  "needs-human-proof"
+                ]
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "blocker": {
+                "$ref": "#/$defs/blocker"
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

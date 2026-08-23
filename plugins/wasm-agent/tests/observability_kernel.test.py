@@ -10,6 +10,7 @@ import urllib.request
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import urlencode
 
 
 PLUGIN_ROOT = Path(__file__).resolve().parents[1]
@@ -164,6 +165,57 @@ class ObservabilityKernelTest(unittest.TestCase):
                 self.assertEqual(payload["command_id"], payload["commandId"])
                 self.assertEqual(payload["command_id"], payload["command"]["id"])
                 self.assertEqual(payload["device_id"], payload["deviceId"])
+            finally:
+                httpd.shutdown()
+                httpd.server_close()
+                thread.join(timeout=3)
+
+    def test_native_control_receipt_exposes_pending_then_terminal_result(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            httpd, thread = start_test_server(Path(tempdir))
+            try:
+                port = httpd.server_address[1]
+                device_id = "windows-receipt-test"
+                command_id = "receipt-proof-1"
+                queued = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/native/control/command",
+                    data=json.dumps({
+                        "device_id": device_id,
+                        "command_id": command_id,
+                        "type": "get_bridge_status",
+                        "payload": {"secret": "must-not-be-replayed"},
+                    }).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(queued, timeout=3):
+                    pass
+                receipt_url = f"http://127.0.0.1:{port}/native/frontier/status?{urlencode({'device_id': device_id, 'command_id': command_id})}"
+                with urllib.request.urlopen(receipt_url, timeout=3) as response:
+                    pending = json.loads(response.read().decode("utf-8"))["commandReceipt"]
+                self.assertTrue(pending["found"])
+                self.assertFalse(pending["terminal"])
+                self.assertNotIn("payload", pending["command"])
+
+                completed = urllib.request.Request(
+                    f"http://127.0.0.1:{port}/native/control/result",
+                    data=json.dumps({
+                        "device_id": device_id,
+                        "command_id": command_id,
+                        "command_type": "get_bridge_status",
+                        "result": {"ok": True, "shellProtocolVersion": 2},
+                    }).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(completed, timeout=3):
+                    pass
+                with urllib.request.urlopen(receipt_url, timeout=3) as response:
+                    terminal = json.loads(response.read().decode("utf-8"))["commandReceipt"]
+                self.assertTrue(terminal["terminal"])
+                self.assertEqual(terminal["status"], "finished")
+                self.assertTrue(terminal["record"]["result"]["ok"])
+                self.assertEqual(terminal["record"]["result"]["shellProtocolVersion"], 2)
             finally:
                 httpd.shutdown()
                 httpd.server_close()

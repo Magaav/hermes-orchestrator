@@ -31,7 +31,7 @@ from hot_shell_common import (  # noqa: E402
 )
 
 
-DEFAULT_ORIGIN = "http://127.0.0.1:8877"
+DEFAULT_ORIGIN = "https://wa.colmeio.com"
 DEFAULT_STATE_DIR = ROOT / "plugins" / "wasm-agent" / "state"
 DEFAULT_ENV_FILES = (
     ROOT / "plugins" / "wasm-agent" / "conf" / "wa.env",
@@ -353,11 +353,16 @@ def queue_control_command(
 
 
 def read_remote_result(origin: str, key: str, device_id: str, command_id: str) -> dict[str, Any]:
-    query = urllib.parse.urlencode({"device_id": device_id})
+    query = urllib.parse.urlencode({"device_id": device_id, "command_id": command_id})
     try:
         payload = request_json("GET", f"{origin.rstrip('/')}/native/frontier/status?{query}", key=key, timeout=15)
     except RuntimeError:
         return {}
+    receipt = payload.get("commandReceipt") if isinstance(payload, dict) else None
+    if isinstance(receipt, dict) and receipt.get("terminal") is True:
+        record = receipt.get("record")
+        if isinstance(record, dict) and record:
+            return record
     latest = payload.get("native_control", {}).get("latest_result", {})
     if isinstance(latest, dict) and str(latest.get("command_id") or "").lower() == command_id.lower():
         return latest
@@ -383,7 +388,7 @@ def wait_for_command_result(
         if found:
             return found
         time.sleep(max(1.0, poll_sec))
-    return {}
+    return read_remote_result(origin, key, device_id, command_id)
 
 
 def classify_command_roundtrip(local: bool, state_dir: Path, device_id: str, command_id: str, record: dict[str, Any]) -> str:
@@ -685,7 +690,13 @@ def main() -> int:
 
     preflight = run_streamed(
         "windows_hot_shell_preflight",
-        ["python3", "tools/windows/prove-hot-shell.py", "--preflight-only", "--wait-sec", str(args.wait_sec)],
+        [
+            "python3", "tools/windows/prove-hot-shell.py",
+            "--origin", windows_origin,
+            "--preflight-only",
+            "--skip-state-cleanup",
+            "--wait-sec", str(args.wait_sec),
+        ],
         run_dir / "01-windows-hot-shell-preflight.log",
     )
     report["phases"].append(preflight)

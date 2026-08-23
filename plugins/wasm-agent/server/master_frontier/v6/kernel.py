@@ -61,7 +61,7 @@ class Kernel:
         })
 
     def _execute_one(self, operation: dict[str, Any], capability: dict[str, Any]) -> dict[str, Any]:
-        operation_digest = contracts.digest({key: operation.get(key) for key in ("id", "cap", "args", "after", "expect")})
+        operation_digest = contracts.digest({key: operation.get(key) for key in ("id", "cap", "args", "after", "expect", "completes_goal", "goal_id")})
         with self._ledger_lock:
             existing = self._operation_ledger.get(operation["id"])
             if existing is not None:
@@ -91,7 +91,11 @@ class Kernel:
         else:
             self._say(operation)
             if self.event_sink:
-                self.event_sink({"type": "operation.started", "operation": operation["id"], "capability": capability["id"]})
+                self.event_sink({
+                    "type": "operation.started", "operation": operation["id"],
+                    "model_operation_id": operation["id"], "capability": capability["id"],
+                    "completes_goal": operation.get("completes_goal") is True,
+                })
             try:
                 raw = self._redact(self.executors[capability["executor"]](capability, operation))
                 if not isinstance(raw, dict):
@@ -119,8 +123,10 @@ class Kernel:
         if self.event_sink:
             self.event_sink({
                 "type": "operation.completed", "operation": operation["id"],
+                "model_operation_id": operation["id"],
                 "capability": capability["id"], "ok": receipt["ok"],
                 "state": receipt["state"], "receipt": receipt["id"],
+                "completes_goal": operation.get("completes_goal") is True,
             })
         return receipt
 
@@ -186,6 +192,13 @@ class Kernel:
                 else requirement in successful_caps
             )
         }
+        if "goal_action" in self.completion_requirements and any(
+            item.get("operation", {}).get("completes_goal") is True
+            and (self.catalog.get(str(item.get("capability") or "")) or {}).get("mode") == "write"
+            and set((self.catalog.get(str(item.get("capability") or "")) or {}).get("completion_proof") or []).issubset(set(item["receipt"].get("proof") or []))
+            for item in successful
+        ):
+            satisfied.add("goal_action")
         gaps = [f"completion:{requirement}" for requirement in sorted(self.completion_requirements - satisfied)]
         for entry in successful:
             capability = self.catalog.get(str(entry.get("capability") or "")) or {}
@@ -238,6 +251,7 @@ class Kernel:
                     "operation": {
                         "id": (item.get("operation") or {}).get("id"),
                         "cap": (item.get("operation") or {}).get("cap"),
+                        "completes_goal": (item.get("operation") or {}).get("completes_goal") is True,
                     },
                     "capability": item.get("capability"), "sequence": item.get("sequence"),
                 }

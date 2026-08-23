@@ -20,8 +20,12 @@ registry returned by authenticated `GET /native/control/clients`. PWA,
 Electron, and Android/Kotlin heartbeats normalize to one client envelope with
 runtime type, build, route, liveness, and bounded observe/control capabilities.
 Commands continue through the audited `/native/control/command` and
-`/native/control/result` paths; the registry does not expose arbitrary code or
-shell execution. Native clients reuse their existing control loop, while a
+`/native/control/result` paths. Exact-capability installed Electron clients may
+also advertise `control.browser.javascript.execute.unrestricted` and
+`windows.shell.execute.unrestricted`; authenticated Master:frontier can then
+queue arbitrary Browser-page JavaScript or arbitrary Windows-user PowerShell/CMD.
+The server validates only the bounded transport envelope, not command semantics.
+Native clients reuse their existing control loop, while a
 plain PWA starts one visibility-aware 15-second loop from
 `public/modules/client-presence.js`.
 
@@ -69,10 +73,52 @@ V6 is owned by `master_frontier/controller_v6.py` and
 audit, persistence, and replay; the head sees the compact dictionary-backed
 `MF6/1` projection. Its provider interface stays at four tools—`discover`,
 `detail`, `execute`, and `checkpoint`—while repository, client, and authorized
-MCP capabilities remain pull-on-demand. Independent non-conflicting operations
+MCP capabilities remain pull-on-demand. Discovery includes a bounded argument
+signature with required markers and declared defaults, so simple capabilities
+can execute immediately while complex schemas remain behind `detail`.
+Independent non-conflicting operations
 run concurrently; mutations use conflict domains and an exactly-once ledger.
+Action requests also carry a bounded model-declared goal ledger inside the
+existing `execute` tool. Each requested outcome binds to a declared capability,
+and only a successful proof-correlated write can satisfy its goal ID. A
+terminal operation ends only itself while any sibling goal remains pending;
+final completion requires every declared goal to be satisfied. Compound actions
+stay in one dependency DAG. The first execute-shaped response is persisted as a
+non-executing proposal; one mandatory audit inference must compare it with every
+clause of the original goal before the reviewed DAG may execute.
+Exact catalog-backed capabilities named by that non-executing proposal become
+visible to its mandatory audit, avoiding a redundant discovery turn; unknown
+capability IDs still fail closed before execution.
+Unrestricted Browser JavaScript has separate semantic capabilities over the
+same audited native transport: read-only inspection requires a bounded typed
+`observation` with a scalar result, while mutation requires an observed changed
+`postcondition`. Observation proof cannot satisfy a mutation goal.
+Capability-provided terminal answers are accepted only when that capability is
+explicitly named by the resolved completion contract, or when its operation
+fulfills a reviewed action goal. A convenient status read cannot terminate an
+unbound broader objective.
+If a proof-bound reviewed action fails and remains causally open, a subsequent
+final decision terminates with a host-shaped failure answer; unsatisfied success
+gates still prevent any success claim, but they do not turn an honest failure
+report into a no-semantic-progress interruption.
+Page-entity observations prove existence only. A later mutation must establish
+and verify the active target inside its own operation and wait for asynchronous
+UI state before interacting; transcript continuity cannot substitute for live
+selection state.
 Model-authored commentary is emitted from the operation it explains, and final
 completion requires declared semantic capabilities plus terminal integrity.
+The ChatGPT-authenticated Codex app-server head keeps the route provider deadline
+fixed: a cold first-turn stall is discarded after 30 seconds and retried once on
+a fresh worker with only the remaining time. Established threads and non-timeout
+failures are never replayed by this recovery path.
+Each stable account session, route, and model now owns a non-ephemeral Codex
+thread. A bounded atomic index under private wasm-agent state resumes that thread
+after worker eviction or service restart without storing prompt or transcript
+bodies. Tool-contract changes and unavailable rollouts create an explicitly
+telemetried fork. At 72 percent of the reported model context window the provider
+requests native app-server compaction and persists its generation/status; the
+run ledger exposes the thread id, turn, resume/fork state, and compaction state.
+Action completion still comes only from the separate host proof/operation ledger.
 See `../MASTER_FRONTIER_V6.md`.
 
 `POST /agent/provider/envelope` and
@@ -234,7 +280,10 @@ reservation, subtract the larger host-derived serialized-request bound, enforce
 cumulative remaining allowance, and require measurable usage. Browser
 avatar-chat uses advisory mode because its provider input cannot be counted
 exactly before dispatch. Exact returned usage and separate attempt/success counts
-are persisted in either mode. Operation-ledger paths
+are persisted in either mode. Token-ledger summaries exclude a stored multi-call
+run aggregate only when exact sibling provider-call rows reproduce its declared
+call count and every token subtotal; aggregate-only legacy usage remains visible.
+Operation-ledger paths
 are prefix-coded and capacity-checked before mutation, while startup recovery
 pages unfinished runs in bounded batches. These changes have local static/behavioral proof; authenticated
 deployed provider behavior remains unverified.

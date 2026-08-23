@@ -114,3 +114,52 @@ def load(
     if not isinstance(snapshot, dict) or snapshot.get("schema") != SNAPSHOT_SCHEMA:
         raise PersistenceError("v6_checkpoint_invalid")
     return snapshot
+
+
+def latest_terminal_evidence(
+    connect: Connect, *, user_id: str, session_id: str, route_id: str,
+    exclude_run_id: str, assistant_content: str,
+) -> dict[str, Any] | None:
+    """Return one transcript-bound, server-verified historical terminal result."""
+    expected = " ".join(str(assistant_content or "").split())[:600]
+    if not user_id or not session_id or not route_id or not expected:
+        return None
+    with connect() as conn:
+        rows = conn.execute(
+            """SELECT run_id,turn_id,created_at,final_json FROM agent_run_tb
+                 WHERE user_id=? AND session_id=? AND protocol='v6' AND status='completed'
+                   AND run_id<>? ORDER BY created_at DESC LIMIT 8""",
+            (str(user_id), str(session_id), str(exclude_run_id)),
+        ).fetchall()
+        for row in rows:
+            try:
+                final = contracts.decode(str(row["final_json"] or "{}"), max_bytes=2_000_000)
+            except contracts.ContractError:
+                continue
+            reply = " ".join(str(final.get("reply") or "").split())[:600] if isinstance(final, dict) else ""
+            if str(final.get("route_id") or "") != route_id or not reply or not reply.startswith(expected):
+                continue
+            gate = conn.execute(
+                """SELECT 1 FROM agent_run_event_tb
+                     WHERE run_id=? AND user_id=? AND session_id=? AND type='gate.decision'
+                       AND json_extract(payload_json,'$.status')='terminal_result' LIMIT 1""",
+                (str(row["run_id"]), str(user_id), str(session_id)),
+            ).fetchone()
+            tools = final.get("local_tools") if isinstance(final.get("local_tools"), list) else []
+            terminal_tools = [
+                item for item in tools[:16] if isinstance(item, dict)
+                and item.get("ok") is True and item.get("status") in {"acknowledged", "completed"}
+            ]
+            evidence = final.get("evidence") if isinstance(final.get("evidence"), list) else []
+            proof = list(dict.fromkeys(
+                str(value)[:240] for item in evidence[:64] if isinstance(item, dict)
+                for value in (item.get("proof") or [])[:32]
+            ))[:32]
+            if gate and terminal_tools and proof:
+                return {
+                    "run_id": str(row["run_id"]), "turn_id": str(row["turn_id"]),
+                    "created_at": int(row["created_at"] or 0), "route_id": route_id,
+                    "reply": reply, "capabilities": [str(item.get("capability") or "") for item in terminal_tools],
+                    "proof": proof,
+                }
+    return None

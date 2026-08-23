@@ -61,6 +61,19 @@ const {
 assert(isMasterFrontierTimelineAction({ label: "tool.finished", meta: "tool.completed" }), "tool completion metadata should stay timeline-visible");
 assert(isMasterFrontierTimelineAction({ id: "bridge_token_usage", label: "Token usage" }), "token usage action should stay timeline-visible");
 assert(!isMasterFrontierTimelineAction({ id: "bridge_run_poll", label: "bridge.run.poll" }), "poll action must stay out of the visible timeline");
+assert(!isMasterFrontierTimelineAction({
+  event_type: "llm.reason.summary",
+  arguments: { commentary: {
+    schema: "master.frontier.v6.commentary.v1",
+    authored_by: "model",
+    visibility: "public",
+    message: "I found the client. I’m inspecting the Browser widget now.",
+  } },
+}), "public model commentary must reach the chat renderer instead of being consumed by the timeline");
+assert(isMasterFrontierTimelineAction({
+  event_type: "llm.reason.summary",
+  arguments: { commentary: { authored_by: "model", visibility: "private", message: "hidden" } },
+}), "private reasoning must remain outside the public commentary path");
 assert(!isMasterFrontierTimelineAction({ id: "node_reply", label: "Node reply", event_type: "node.reply" }), "ordinary action rows must not be promoted");
 assert(!isMasterFrontierTimelineAction({ id: "mf_llm_1", label: "LLM decision", topic: "run-api", kind: "trace", meta: "buffered" }), "buffered LLM decisions belong in the per-turn action chain");
 assert(!isMasterFrontierTimelineAction({ id: "mf_tool_1", label: "files", topic: "run-api", kind: "tool", meta: "calling" }), "function/dataflow rows belong in the per-turn action chain");

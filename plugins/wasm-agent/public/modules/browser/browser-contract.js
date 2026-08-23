@@ -26,6 +26,14 @@ export function normalizeBrowserAddress(value) {
   return url.href;
 }
 
+export function browserSurfaceIntersectsOverlay(browserRect, overlayRect) {
+  if (!browserRect || !overlayRect || !overlayRect.width || !overlayRect.height) return false;
+  return browserRect.left < overlayRect.right
+    && browserRect.right > overlayRect.left
+    && browserRect.top < overlayRect.bottom
+    && browserRect.bottom > overlayRect.top;
+}
+
 export const LOCAL_BROWSER_FIXTURE = Object.freeze({
   url: "browser://local/hello",
   html: "<main><h1>WASM Browser</h1><p>Rendered locally by WASM.</p><section><button>Inspect</button><button>Navigate</button></section></main>",

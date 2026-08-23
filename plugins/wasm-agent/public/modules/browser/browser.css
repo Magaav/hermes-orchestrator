@@ -70,6 +70,8 @@
 }
 .browser-portal-native-placeholder { position: absolute; inset: 0; display: grid; place-items: center; padding: 28px; color: #91a1b7; text-align: center; }
 .browser-portal-native-placeholder[hidden] { display: none; }
+.browser-portal-snapshot { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: fill; }
+.browser-portal-snapshot[hidden] { display: none; }
 
 .browser-portal-footer { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: center; gap: 12px; padding: 8px 10px; border-top: 1px solid rgba(153, 183, 220, .13); color: #99a9bd; background: #0b1019; }
 .browser-portal-session { display: flex; align-items: center; gap: 7px; min-width: 0; }

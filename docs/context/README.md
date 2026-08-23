@@ -15,6 +15,7 @@ future empty-context agent cheap, fast, and hard to mislead.
 | `HARNESS.md` | Self-improving harness contract and promotion rules |
 | `HARNESS_LOOPS.json` | Machine-readable five-loop state machines, benchmark matrix, regression gate, budgets, banks, and terminal outcomes |
 | `HARNESS_PROMISES.json` | Machine-readable deterministic promise registry |
+| `PRODUCT_READINESS_RESULT_SCHEMA.json` | Versioned aggregate result contract for the three canonical wasm-agent journeys |
 
 ## Status Enum
 
@@ -30,6 +31,39 @@ future empty-context agent cheap, fast, and hard to mislead.
 Rules: missing verification means not verified. Build success alone is not
 runtime proof. Roadmap docs cannot upgrade runtime status. Never silently
 upgrade a claim.
+
+## WASM Agent Product Readiness
+
+The product-readiness evaluator composes existing registered promises; it does
+not duplicate their repository, Electron, Windows, or Android behavior. Its
+canonical entrypoint is:
+
+```bash
+python3 tools/context/evaluate-wasm-agent-product-readiness.py
+```
+
+The default is artifact-only: it inspects and freshness-checks existing proof
+artifacts without running a provider, production command, native-control loop,
+build, install, or device action. `--run <journey-id>` is the explicit opt-in
+for serialized execution of that journey's registered promises. The stable
+journey IDs are `repository-agent`, `electron-browser-agent`, and
+`android-voice-agent`; `--run all` is intentionally stateful and must not be
+the default.
+
+The authoritative result uses schema
+`wasm-agent.product-readiness.result.v1` and is written with a concise summary:
+
+```text
+reports/context/latest/wasm-agent-product-readiness-result.json
+reports/context/latest/wasm-agent-product-readiness-summary.md
+reports/context/product-readiness/<timestamp>.json
+reports/context/product-readiness/<timestamp>.md
+```
+
+`evaluationCompleted: true` means the evidence was normalized successfully; it
+does not mean `ready: true`. Missing measurements remain `null` and are listed
+under `missingMetrics`. A stale, blocked, failing, invalid-environment, or
+human-proof lane remains visible instead of being converted into a pass.
 
 ## Read-Before-Edit
 

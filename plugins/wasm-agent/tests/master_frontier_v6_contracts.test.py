@@ -62,6 +62,25 @@ class V6ContractsTests(unittest.TestCase):
             "acting",
         )
 
+    def test_terminal_result_is_opt_in_and_requires_trusted_write_proof(self) -> None:
+        terminal = contracts.capability({
+            "id": "client.browser.inspect", "kind": "observe", "authority": "client.ui.inspect",
+            "executor": "client.browser.inspect", "terminal_result": True,
+        })
+        self.assertTrue(terminal["terminal_result"])
+        ordinary = contracts.capability({
+            "id": "repo.read", "kind": "observe", "authority": "repo.read", "executor": "repo.read",
+        })
+        self.assertFalse(ordinary["terminal_result"])
+        write = contracts.capability({
+            "id": "client.space.open", "kind": "act", "authority": "client.ui.control",
+            "executor": "client.space.open", "mode": "write", "proof": ["client.space.active"],
+            "terminal_result": True,
+        })
+        self.assertTrue(write["terminal_result"])
+        with self.assertRaisesRegex(contracts.ContractError, "capability_terminal_result_unsafe"):
+            contracts.capability({"id": "unsafe.write", "kind": "act", "authority": "write", "executor": "write", "terminal_result": True})
+
     def test_canonical_numbers_match_rfc_8785_appendix_b(self) -> None:
         vectors = {
             "0000000000000000": "0",

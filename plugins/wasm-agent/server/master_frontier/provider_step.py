@@ -36,7 +36,7 @@ def complete(
                 os.environ.get("MASTER_FRONTIER_CODEX_MODEL", "").strip()
                 or os.environ.get("MF5_CODEX_MODEL", "").strip()
                 or os.environ.get("WASM_AGENT_CODEX_MODEL", "").strip()
-                or "gpt-5.6-terra"
+                or "gpt-5.6-luna"
             ),
             session_key=str(body.get("session_id") or run_id),
             route_id=str(envelope.get("route_id") or ""),

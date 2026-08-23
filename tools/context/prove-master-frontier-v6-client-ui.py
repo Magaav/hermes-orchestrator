@@ -82,6 +82,7 @@ def command_artifact(state: Path, command_id: str) -> tuple[Path | None, dict[st
 
 
 def main() -> int:
+    started_monotonic = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--origin", default="https://wa.colmeio.com")
     parser.add_argument("--cloud-root", type=Path, default=Path("/home/ubuntu/.local/share/wasm-agent-cloud"))
@@ -95,6 +96,7 @@ def main() -> int:
     }
     if not clients_before:
         report["error"] = {"code": "live_electron_client_missing"}
+        report["durationMs"] = round((time.monotonic() - started_monotonic) * 1000)
         REPORT.parent.mkdir(parents=True, exist_ok=True)
         REPORT.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         print(json.dumps(report, separators=(",", ":")))
@@ -120,11 +122,10 @@ def main() -> int:
         "max_output_tokens": 800,
         "envelope": {
             "schema": "hermes.wasm_agent.master_frontier.v6", "trace_id": nonce,
-            "objective": OBJECTIVE, "objective_kind": "conversation", "surface": "avatar-chat",
+            "objective": OBJECTIVE, "objective_kind": "model_decision", "surface": "avatar-chat",
             "route_id": "wasm-agent.avatar-chat.ui",
             "compact_state": {"surface": "production-installed-client-proof", "route_id": "wasm-agent.avatar-chat.ui"},
             "capabilities": ["client.ui.inspect", "client.ui.control"],
-            "completion_capabilities": ["client.widget.open"],
             "allowed_actions": [{"id": "answer"}, {"id": "client.inspect"}, {"id": "client.widget.open"}],
             "budget": {"provider_call_ms_max": 90000, "task_lease_ms_max": 300000},
         },
@@ -199,6 +200,9 @@ def main() -> int:
         "nonemptyReply": bool(str(result.get("reply") or "").strip()),
         "providerCalls": int(diagnostics.get("provider_calls") or 0),
         "exactUsageMeasured": (diagnostics.get("token_usage_total") or {}).get("exact") is True,
+        "tokenUsage": diagnostics.get("token_usage_total") if isinstance(diagnostics.get("token_usage_total"), dict) else None,
+        "performance": diagnostics.get("performance") if isinstance(diagnostics.get("performance"), dict) else None,
+        "durationMs": round((time.monotonic() - started_monotonic) * 1000),
         "completionGatePassed": diagnostics.get("completion_gaps") == [],
         "clientWidgetAcknowledged": acknowledged,
         "clientCommandArtifactVerified": command_verified,

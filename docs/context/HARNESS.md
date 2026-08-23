@@ -106,6 +106,49 @@ Each promise must declare:
 Promises should be atomic, idempotent when practical, non-destructive by
 default, and small enough that a failure explains the next move.
 
+## Product-Readiness Composition
+
+The wasm-agent product-readiness evaluator is a thin composition layer over
+registered promises. It owns normalization, freshness, metric coverage,
+redaction, comparison, and the aggregate readiness decision; the child proof
+scripts continue to own product behavior.
+
+```bash
+# Validate schema/registry/result invariants only.
+python3 tools/context/evaluate-wasm-agent-product-readiness.py --validate-only
+
+# Artifact-only evaluation; no child promise is executed.
+python3 tools/context/evaluate-wasm-agent-product-readiness.py
+
+# Explicitly execute one journey's registered promises, then normalize.
+python3 tools/context/evaluate-wasm-agent-product-readiness.py --run repository-agent
+python3 tools/context/evaluate-wasm-agent-product-readiness.py --run electron-browser-agent
+python3 tools/context/evaluate-wasm-agent-product-readiness.py --run android-voice-agent
+```
+
+`--run` is repeatable and `--run all` exists for an intentionally stateful full
+campaign. Commands are serialized. Cheap artifact inspection remains the
+default so a readiness read cannot unexpectedly call a provider, control a
+client, build/install software, or contact a device.
+
+The evaluator preserves the allowed harness statuses and keeps
+`evaluationCompleted` independent from `ready`. Required metrics that a child
+artifact did not measure remain `null` and appear in `missingMetrics`; evidence
+is referenced by path and SHA-256 rather than embedded as raw logs. The
+authoritative schema is `docs/context/PRODUCT_READINESS_RESULT_SCHEMA.json`.
+Latest and timestamped outputs are:
+
+```text
+reports/context/latest/wasm-agent-product-readiness-result.json
+reports/context/latest/wasm-agent-product-readiness-summary.md
+reports/context/product-readiness/*.json
+reports/context/product-readiness/*.md
+```
+
+Use `--compare <prior-result.json>` to retain before/after status and metric
+coverage. Never weaken a journey's required metrics to turn an honest blocker
+into a pass.
+
 ## Promotion Rule
 
 When the same manual inference appears for the second time, add a promise

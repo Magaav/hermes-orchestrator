@@ -31,6 +31,8 @@ def _workspace_root(route_contract: dict[str, Any]) -> str:
 
 
 def _proof(intent_name: str) -> list[str]:
+    if intent_name == "client_action":
+        return ["route", "client_ack", "answer"]
     if intent_name == "implementation_planning":
         return ["route", "evidence", "decision"]
     if intent_name == "implementation":
@@ -56,6 +58,8 @@ def _evidence_floor(envelope: dict[str, Any], intent_name: str, caps: list[str])
         return "source"
     if intent_name == "capability_inquiry":
         return "route"
+    if intent_name == "client_action":
+        return "runtime"
     if intent.objective_requires_runtime_evidence(envelope):
         return "runtime"
     if intent.objective_requires_source_evidence(envelope):
@@ -157,6 +161,8 @@ def _tools_first(intent_name: str, caps: list[str], route_id: str, evidence_floo
 def _intent_name(envelope: dict[str, Any]) -> str:
     objective_kind = str(envelope.get("objective_kind") or "").strip().lower().replace("-", "_")
     objective = str(envelope.get("objective") or "")
+    if intent.objective_is_declared_client_action(envelope):
+        return "client_action"
     if objective_kind == "model_decision" and intent.text_is_capability_inquiry(objective):
         return "capability_inquiry"
     if objective_kind in {
@@ -169,6 +175,7 @@ def _intent_name(envelope: dict[str, Any]) -> str:
         "diagnosis",
         "source_investigation",
         "runtime_inspection",
+        "client_action",
     }:
         if objective_kind in {"conversation", "general_conversation"}:
             return "answer"
@@ -224,6 +231,8 @@ def task_contract(envelope: dict[str, Any]) -> dict[str, Any]:
         "block_codes": block_codes,
         "hermes": "subagent_harness_only",
     }
+    if intent_name == "client_action" and intent.objective_is_declared_client_state_query(envelope):
+        generated["completion_capabilities"] = ["authority:client.ui.inspect"]
     declared = envelope.get("task_contract") if isinstance(envelope.get("task_contract"), dict) else {}
     for key in (
         "request_class", "objective_kind", "declared_classes", "authority",

@@ -4,7 +4,7 @@ from __future__ import annotations
 import hashlib
 from typing import Any
 
-from . import authority, budget, provider_step, run_control, tool_runtime
+from . import authority, budget, client_ui_actions, provider_step, run_control, tool_runtime
 from .v5 import continuity
 from .v6 import controller, kernel, mcp_host, performance, persistence, state as working_state, v5_bridge
 
@@ -14,6 +14,19 @@ class V6Error(RuntimeError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+STALL_FIXTURE_ID = "v6_no_semantic_progress"
+
+
+def _debug_stall_error(body: dict[str, Any]) -> controller.ControllerError | None:
+    if str(body.get("debug_fixture") or "") != STALL_FIXTURE_ID:
+        return None
+    return controller.ControllerError(
+        STALL_FIXTURE_ID,
+        phase="debug_fixture",
+        missing=["completion:repo.read"],
+    )
 
 
 def _completion_requirements(envelope: dict[str, Any], route: dict[str, Any]) -> set[str]:
@@ -30,6 +43,8 @@ def _completion_requirements(envelope: dict[str, Any], route: dict[str, Any]) ->
         return {"repo.test", "repo.diff", "repo.prove"}
     if request_class in {"source_investigation", "implementation_planning"}:
         return {"authority:repo.read"}
+    if request_class == "client_action":
+        return {"goal_action"}
     return set()
 
 
@@ -40,7 +55,12 @@ def _usage_total(usages: list[dict[str, Any]], attempts: int) -> dict[str, Any]:
         "calls": attempts, "metered_calls": len(metered),
     }
     latest = metered[-1] if metered else {}
-    for key in ("context_window_tokens", "rate_limits"):
+    for key in (
+        "model", "context_window_tokens", "rate_limits", "status_telemetry",
+        "provider_thread_id", "provider_thread_turn", "provider_thread_resumed",
+        "provider_thread_fork_reason", "provider_compaction_generation",
+        "provider_compaction_status", "stable_context_mode", "stable_context_reused",
+    ):
         if latest.get(key) is not None:
             result[key] = latest[key]
     return result
@@ -172,20 +192,16 @@ def execute_owned(
     v5_bridge.register_repository(agent, invoke_v5, route=route)
     clients_payload = runtime["native_control_clients_payload"](server) if authority.CLIENT_UI_INSPECT in granted else {}
     clients = clients_payload.get("clients") if isinstance(clients_payload.get("clients"), list) else []
-    electron = [item for item in clients if isinstance(item, dict) and item.get("live") is True and item.get("runtime_type") == "electron"]
-    if electron:
+    live_clients = [item for item in clients if isinstance(item, dict) and item.get("live") is True]
+    if live_clients:
         client_ui_contract = route.get("client_ui") if isinstance(route.get("client_ui"), dict) else {}
-        operation_caps = {
-            "open_widget": "control.widget.open",
-            "browser_navigate": "control.browser.navigate",
-        }
         required_client_caps = {
-            operation_caps[operation]
+            client_ui_actions.CAPABILITIES[operation]
             for operation in (client_ui_contract.get("operations") or [])
-            if operation in operation_caps
+            if operation in client_ui_actions.CAPABILITIES
         }
         selected = max(
-            enumerate(electron),
+            enumerate(live_clients),
             key=lambda pair: (
                 len(required_client_caps & {str(cap) for cap in (pair[1].get("capabilities") or [])}),
                 -pair[0],
@@ -193,7 +209,7 @@ def execute_owned(
         )[1]
         manifest = {
             "runtime_type": "electron", "client_id": selected.get("client_id"),
-            "capabilities": sorted({str(cap) for cap in (selected.get("capabilities") or [])}),
+            "capabilities": sorted(required_client_caps & {str(cap) for cap in (selected.get("capabilities") or [])}),
             "widget_ids": [str(item) for item in (client_ui_contract.get("widget_ids") or [])[:32]],
         }
         v5_bridge.register_client(agent, manifest, invoke_v5)
@@ -228,6 +244,12 @@ def execute_owned(
         except persistence.PersistenceError as exc:
             runtime["direct_envelope_error"](exc.code, str(exc), runtime["HTTPStatus"].CONFLICT)
             raise V6Error(exc.code, str(exc)) from exc
+    elif authority.request_class(route) == "client_action":
+        initial_discovered.update(
+            str(item.get("id") or "")
+            for item in agent.catalog.all().values()
+            if str(item.get("authority") or "") in {authority.CLIENT_UI_INSPECT, authority.CLIENT_UI_CONTROL}
+        )
 
     route_evidence = agent.evidence.put(
         kind="route.contract", subject=f"route:{route.get('route_id')}",
@@ -237,6 +259,27 @@ def execute_owned(
         ),
         detail={"route_id": route.get("route_id"), "checks": check_ids, "allowed_edit_operations": edit_operations},
     )
+    prior_terminal = None
+    if answer_only:
+        assistant_content = next((item["content"] for item in reversed(history) if item["role"] == "assistant"), "")
+        prior_terminal = persistence.latest_terminal_evidence(
+            runtime["auth_connect"], user_id=principal, session_id=session_id,
+            route_id=str(route.get("route_id") or ""), exclude_run_id=run_id,
+            assistant_content=assistant_content,
+        )
+        if prior_terminal:
+            proof_summary = ", ".join(prior_terminal["proof"][:8])
+            agent.evidence.put(
+                kind="prior.terminal_result", subject=f"run:{prior_terminal['run_id']}",
+                summary=(
+                    f"Verified prior terminal result (historical; proof: {proof_summary}): "
+                    f"{prior_terminal['reply']} Display visibility and inspection availability are independent; "
+                    "a hidden surface does not invalidate its verified inspection data. This terminal result proves "
+                    "the inspection capability was available for that observation. A follow-up may distinguish "
+                    "historical from current state, but must not deny the verified prior inspection or its capability."
+                ),
+                detail=prior_terminal, proof=prior_terminal["proof"],
+            )
 
     usages: list[dict[str, Any]] = []
     checkpoint_ref: dict[str, Any] = {}
@@ -258,8 +301,12 @@ def execute_owned(
         append("state.writeback", str(reason), {"checkpoint": checkpoint_ref})
 
     initial_state = initial_state or working_state.initial(objective)
-    if route_evidence["id"] not in (initial_state.get("known") or []):
-        initial_state = working_state.apply(initial_state, working_state.delta(initial_state, add_known=[route_evidence["id"]]))
+    new_evidence_ids = [
+        str(item.get("id") or "") for item in agent.evidence.list()
+        if str(item.get("id") or "") not in (initial_state.get("known") or [])
+    ]
+    if new_evidence_ids:
+        initial_state = working_state.apply(initial_state, working_state.delta(initial_state, add_known=new_evidence_ids))
     persist(initial_state, initial_discovered, "run_started")
 
     def complete(messages: list[dict[str, str]], tools: list[dict[str, Any]], index: int) -> dict[str, Any]:
@@ -307,6 +354,13 @@ def execute_owned(
             append("gate.decision", str(event.get("status") or "gate"), event)
 
     try:
+        debug_stall = _debug_stall_error(body)
+        if debug_stall is not None:
+            append("gate.decision", STALL_FIXTURE_ID, {
+                "status": "stalled", "fixture": STALL_FIXTURE_ID,
+                "missing": debug_stall.missing,
+            })
+            raise debug_stall
         result = controller.run(
             objective, agent, complete, emit=loop_event,
             cancelled=lambda: run_control.requested(run_id),
@@ -315,11 +369,15 @@ def execute_owned(
             tools=[] if answer_only else controller.TOOLS,
         )
     except controller.ControllerError as exc:
-        code = str(exc)
+        code = exc.code
+        message = str(exc)
         terminal_status = "cancelled" if code == "v6_run_cancelled" else "interrupted"
-        runtime["finish_agent_run"](server, run_id, status=terminal_status, error={"code": code, "message": code, "resume_checkpoint": checkpoint_ref})
-        runtime["direct_envelope_error"](code, code, runtime["HTTPStatus"].CONFLICT)
-        raise V6Error(code, code) from exc
+        runtime["finish_agent_run"](server, run_id, status=terminal_status, error={
+            "code": code, "message": message, "phase": exc.phase,
+            "missing": exc.missing, "resume_checkpoint": checkpoint_ref,
+        })
+        runtime["direct_envelope_error"](code, message, runtime["HTTPStatus"].CONFLICT)
+        raise V6Error(code, message) from exc
     except Exception as exc:
         code = str(getattr(exc, "code", "") or "v6_provider_interrupted")
         message = str(getattr(exc, "message", "") or str(exc) or code)[:500]
@@ -340,7 +398,7 @@ def execute_owned(
             "provider_calls": len(usages), "token_usage": usages,
             "token_usage_total": _usage_total(usages, len(usages)),
             "context": [item.get("context") for item in result.get("trace") or []],
-            "completion_gaps": agent.completion_gaps(),
+            "completion_gaps": [*agent.completion_gaps(), *[f"goal:{item.get('id')}" for item in result["state"].get("goals", []) if item.get("status") != "satisfied"]],
             "resume_checkpoint": checkpoint_ref,
             "performance": perf.snapshot(),
         },

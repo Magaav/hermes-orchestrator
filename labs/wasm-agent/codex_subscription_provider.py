@@ -6,20 +6,85 @@ import json
 import os
 import shutil
 import subprocess
-import tempfile
 import threading
 import time
 import hashlib
 import atexit
 import select
+from pathlib import Path
 from typing import Any
+
+import codex_conversation_state
 
 
 class CodexAppServerFailure(RuntimeError):
     pass
 
 
-MODEL_CONTEXT_WINDOWS = {"gpt-5.6-terra": 258_000}
+class CodexDecisionContractFailure(CodexAppServerFailure):
+    """A model decision that can be safely replayed on a fresh worker."""
+
+    code = "codex_decision_contract_invalid"
+
+
+MODEL_CONTEXT_WINDOWS = {
+    "gpt-5.6-luna": 258_400,
+    "gpt-5.6-terra": 258_000,
+}
+PRIMARY_ATTEMPT_MAX_SEC = 30
+STATUS_TELEMETRY_SCHEMA = "hermes.wasm_agent.provider_status.v1"
+LUNA_RECOVERY_MODEL = "gpt-5.6-terra"
+COMPACTION_RATIO = 0.72
+
+
+def _enforce_status_telemetry(
+    usage: dict[str, Any], model: str, rate_limits: dict[str, Any], *,
+    context_window_source: str = "",
+) -> dict[str, Any]:
+    resolved_model = str(model or usage.get("model") or "").strip()
+    if not resolved_model:
+        raise CodexAppServerFailure("Provider status contract is missing the resolved model.")
+    context_window = usage.get("context_window_tokens")
+    if context_window is None:
+        context_window = MODEL_CONTEXT_WINDOWS.get(resolved_model)
+        if context_window is not None:
+            usage["context_window_tokens"] = context_window
+            context_window_source = "model_capability_registry"
+    if not isinstance(context_window, (int, float)) or isinstance(context_window, bool) or int(context_window) <= 0:
+        raise CodexAppServerFailure("Provider status contract is missing the context window.")
+    weekly = rate_limits.get("seven_day") if isinstance(rate_limits.get("seven_day"), dict) else None
+    seven_day = {
+        "status": "reported" if weekly else "provider_omitted",
+        "source": "codex_app_server.account_rate_limits",
+    }
+    if weekly:
+        seven_day.update(weekly)
+    usage["model"] = resolved_model
+    if rate_limits:
+        usage["rate_limits"] = rate_limits
+    usage["status_telemetry"] = {
+        "schema": STATUS_TELEMETRY_SCHEMA,
+        "captured_at": int(time.time()),
+        "model": {"status": "reported", "value": resolved_model, "source": "resolved_request"},
+        "context_window": {
+            "status": "reported", "tokens": int(context_window),
+            "source": context_window_source or "codex_app_server.token_usage",
+        },
+        "seven_day": seven_day,
+    }
+    return usage
+
+
+def resolve_codex_executable(configured: str = "") -> str:
+    candidates = [configured.strip(), shutil.which("codex") or ""]
+    extensions = Path.home() / ".vscode-server" / "extensions"
+    candidates.extend(str(path) for path in sorted(
+        extensions.glob("openai.chatgpt-*/bin/linux-*/codex"), reverse=True,
+    ))
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return ""
 
 
 def _schema(tool_names: list[str]) -> dict[str, Any]:
@@ -65,7 +130,8 @@ def _prompt(
         "You are the decision head inside an external deterministic tool loop. "
         "Do not inspect files, run commands, browse, call MCP, or use any tool from your own environment. "
         "The enclosing V5 host exclusively executes the declared native tools and will return observations. "
-        f"{mode} Follow the supplied messages and tool schemas exactly.\n\n"
+        f"{mode} Follow the supplied messages and tool schemas exactly. "
+        "Every arguments_json value must be one complete valid JSON object, never a fragment.\n\n"
         + json.dumps({"messages": messages, "tools": tools}, ensure_ascii=False, separators=(",", ":"))
     )
 
@@ -103,6 +169,20 @@ def _usage_from_app_server(value: dict[str, Any], model: str) -> dict[str, Any]:
     }
 
 
+def _tool_arguments(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str):
+        raise CodexDecisionContractFailure("Codex emitted invalid native-tool arguments.")
+    try:
+        decoded = json.loads(value or "{}")
+    except ValueError as exc:
+        raise CodexDecisionContractFailure("Codex emitted invalid native-tool argument JSON.") from exc
+    if not isinstance(decoded, dict):
+        raise CodexDecisionContractFailure("Codex emitted non-object native-tool arguments.")
+    return decoded
+
+
 def _rate_limits_from_app_server(value: dict[str, Any]) -> dict[str, Any]:
     snapshot = value.get("rateLimits") if isinstance(value.get("rateLimits"), dict) else value
     windows = [window for window in (snapshot.get("primary"), snapshot.get("secondary")) if isinstance(window, dict)]
@@ -119,17 +199,22 @@ def _rate_limits_from_app_server(value: dict[str, Any]) -> dict[str, Any]:
 
 
 class _AppServerWorker:
-    def __init__(self, executable: str, model: str, session_key: str, tool_digest: str) -> None:
+    def __init__(self, executable: str, model: str, session_key: str, tool_digest: str, state_key: str) -> None:
         self.model = model
         self.session_key = session_key
         self.tool_digest = tool_digest
+        self.state_key = state_key
         self.lock = threading.Lock()
         self.request_id = 0
         self.thread_id = ""
         self.turn_count = 0
+        self.compaction_generation = 0
+        self.compaction_status = "none"
+        self.resumed = False
+        self.fork_reason = ""
         self.notifications: list[dict[str, Any]] = []
         self.rate_limits: dict[str, Any] = {}
-        self.root = tempfile.TemporaryDirectory(prefix="mf6-codex-app-")
+        self.root = codex_conversation_state.decision_cwd()
         env = {
             key: value for key, value in os.environ.items()
             if key in {
@@ -140,7 +225,7 @@ class _AppServerWorker:
         }
         try:
             self.process = subprocess.Popen(
-                [executable, "app-server", "--stdio"], cwd=self.root.name, env=env,
+                [executable, "app-server", "--stdio"], cwd=str(self.root), env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 text=True, bufsize=1,
             )
@@ -153,7 +238,6 @@ class _AppServerWorker:
                     process.wait(timeout=3)
                 except subprocess.TimeoutExpired:
                     process.kill()
-            self.root.cleanup()
             raise
 
     def close(self) -> None:
@@ -163,7 +247,6 @@ class _AppServerWorker:
                 self.process.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 self.process.kill()
-        self.root.cleanup()
 
     def _send(self, method: str, params: dict[str, Any], *, notification: bool = False) -> int:
         if self.process.poll() is not None or self.process.stdin is None:
@@ -215,21 +298,58 @@ class _AppServerWorker:
         }})
         self._response(request_id, deadline)
         self._send("initialized", {}, notification=True)
-        request_id = self._send("thread/start", {
-            "model": self.model, "cwd": self.root.name, "approvalPolicy": "never",
-            "sandbox": "read-only", "ephemeral": True, "serviceName": "wasm-agent-master-frontier",
+        persisted = codex_conversation_state.load(self.state_key)
+        persisted_thread = str(persisted.get("thread_id") or "")
+        persisted_digest = str(persisted.get("tool_digest") or "")
+        self.turn_count = max(0, int(persisted.get("turn_count") or 0))
+        self.compaction_generation = max(0, int(persisted.get("compaction_generation") or 0))
+        thread_params = {
+            "model": self.model, "cwd": str(self.root), "approvalPolicy": "never",
+            "sandbox": "read-only",
             "baseInstructions": (
                 "You are the decision head inside an external deterministic tool loop. "
                 "Never inspect files, execute commands, browse, call MCP, or use Codex-owned tools. "
                 "Return only the structured decision requested by the host."
             ),
-        })
-        result = self._response(request_id, deadline)
+        }
+        result: dict[str, Any] = {}
+        if persisted_thread and persisted_digest == self.tool_digest:
+            try:
+                request_id = self._send("thread/resume", {"threadId": persisted_thread, **thread_params})
+                result = self._response(request_id, deadline)
+                self.resumed = True
+            except CodexAppServerFailure:
+                self.turn_count = 0
+                self.fork_reason = "resume_unavailable"
+        elif persisted_thread:
+            self.turn_count = 0
+            self.compaction_generation = 0
+            self.fork_reason = "tool_contract_changed"
+        if not result:
+            request_id = self._send("thread/start", {
+                **thread_params, "ephemeral": False, "serviceName": "wasm-agent-master-frontier",
+            })
+            result = self._response(request_id, deadline)
         self.thread_id = str((result.get("thread") or {}).get("id") or "")
         if not self.thread_id:
             raise CodexAppServerFailure("Codex app-server did not create a thread.")
         request_id = self._send("account/rateLimits/read", {})
         self.rate_limits = _rate_limits_from_app_server(self._response(request_id, deadline))
+        self._persist()
+
+    def _persist(self) -> None:
+        codex_conversation_state.save(self.state_key, {
+            "thread_id": self.thread_id, "tool_digest": self.tool_digest, "model": self.model,
+            "turn_count": self.turn_count, "compaction_generation": self.compaction_generation,
+            "compaction_status": self.compaction_status, "fork_reason": self.fork_reason,
+        })
+
+    def _compact(self, deadline: float) -> None:
+        request_id = self._send("thread/compact/start", {"threadId": self.thread_id})
+        self._response(request_id, deadline)
+        self.compaction_generation += 1
+        self.compaction_status = "requested"
+        self._persist()
 
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]], *,
@@ -271,7 +391,10 @@ class _AppServerWorker:
                 item_type = str(item.get("type") or "")
                 if method == "item/completed" and item_type == "agentMessage":
                     final_text = str(item.get("text") or "")
-                if method == "item/started" and item_type not in {"", "userMessage", "agentMessage", "reasoning"}:
+                if method == "item/completed" and item_type == "contextCompaction":
+                    self.compaction_status = "completed"
+                    self._persist()
+                if method == "item/started" and item_type not in {"", "userMessage", "agentMessage", "reasoning", "contextCompaction"}:
                     violations.append(item_type)
                 if method == "thread/tokenUsage/updated":
                     token_usage = params.get("tokenUsage") if isinstance(params.get("tokenUsage"), dict) else {}
@@ -279,8 +402,10 @@ class _AppServerWorker:
                     usage = _usage_from_app_server(last, self.model)
                     if token_usage.get("modelContextWindow") is not None:
                         usage["context_window_tokens"] = int(token_usage["modelContextWindow"])
+                        usage["context_window_source"] = "codex_app_server.token_usage"
                     elif self.model in MODEL_CONTEXT_WINDOWS:
                         usage["context_window_tokens"] = MODEL_CONTEXT_WINDOWS[self.model]
+                        usage["context_window_source"] = "model_capability_registry"
                 if method == "account/rateLimits/updated":
                     update = _rate_limits_from_app_server(params)
                     if update:
@@ -292,10 +417,27 @@ class _AppServerWorker:
                     break
                 if method == "thread/status/changed" and final_text and usage:
                     break
+            usage["provider_thread_turn"] = self.turn_count + 1
+            usage["stable_context_mode"] = "thread_continuation"
+            usage["stable_context_reused"] = self.turn_count > 0
             self.turn_count += 1
             usage["provider_thread_id"] = self.thread_id
-            if self.rate_limits:
-                usage["rate_limits"] = self.rate_limits
+            usage["provider_thread_resumed"] = self.resumed
+            usage["provider_thread_fork_reason"] = self.fork_reason
+            context_window = int(usage.get("context_window_tokens") or MODEL_CONTEXT_WINDOWS.get(self.model) or 0)
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            if (
+                context_window and prompt_tokens / context_window >= COMPACTION_RATIO
+                and self.compaction_status != "requested"
+            ):
+                self._compact(deadline)
+            self._persist()
+            usage["provider_compaction_generation"] = self.compaction_generation
+            usage["provider_compaction_status"] = self.compaction_status
+            _enforce_status_telemetry(
+                usage, self.model, self.rate_limits,
+                context_window_source=str(usage.pop("context_window_source", "")),
+            )
             if violations:
                 raise CodexAppServerFailure("Codex crossed the decision-head boundary with items: " + ", ".join(sorted(set(violations))))
             try:
@@ -310,10 +452,7 @@ class _AppServerWorker:
             for index, call in enumerate((decision.get("tool_calls") or [])[:1]):
                 if not isinstance(call, dict) or str(call.get("name") or "") not in tool_names:
                     raise CodexAppServerFailure("Codex selected an undeclared V6 tool.")
-                try:
-                    arguments = json.loads(str(call.get("arguments_json") or "{}"))
-                except ValueError as exc:
-                    raise CodexAppServerFailure("Codex emitted invalid native-tool argument JSON.") from exc
+                arguments = _tool_arguments(call.get("arguments_json") or {})
                 normalized.append({"id": f"codex_app_{index + 1}", "name": str(call["name"]), "arguments": arguments})
             return {
                 "reply": str(decision.get("reply") or "").strip(), "tool_calls": normalized,
@@ -328,22 +467,29 @@ _WORKERS_LOCK = threading.Lock()
 _MAX_WORKERS = 8
 
 
+def _tool_digest(tools: list[dict[str, Any]]) -> str:
+    return hashlib.sha256(json.dumps(tools, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def _worker_key(session_key: str, route_id: str, model: str, tools: list[dict[str, Any]]) -> str:
-    tool_digest = hashlib.sha256(json.dumps(tools, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return hashlib.sha256(f"{session_key}\0{route_id}\0{model}\0{tool_digest}".encode()).hexdigest()
+    del tools
+    return hashlib.sha256(f"{session_key}\0{route_id}\0{model}".encode()).hexdigest()
 
 
 def _worker(executable: str, session_key: str, route_id: str, model: str, tools: list[dict[str, Any]]) -> _AppServerWorker:
     key = _worker_key(session_key, route_id, model, tools)
+    tool_digest = _tool_digest(tools)
     with _WORKERS_LOCK:
         existing = _WORKERS.get(key)
-        if existing is not None and existing.process.poll() is None:
+        if existing is not None and existing.process.poll() is None and existing.tool_digest == tool_digest:
             return existing
         while len(_WORKERS) >= _MAX_WORKERS:
             _, stale = _WORKERS.pop(next(iter(_WORKERS)))
             stale.close()
-        tool_digest = key[-16:]
-        created = _AppServerWorker(executable, model, session_key, tool_digest)
+        if existing is not None:
+            existing.close()
+            _WORKERS.pop(key, None)
+        created = _AppServerWorker(executable, model, session_key, tool_digest, key)
         _WORKERS[key] = created
         return created
 
@@ -368,21 +514,40 @@ atexit.register(_close_workers)
 def complete(
     messages: list[dict[str, Any]], tools: list[dict[str, Any]], *,
     completion_only: bool, require_tool: bool = False, timeout: int,
-    model: str = "gpt-5.6-terra", session_key: str = "default", route_id: str = "",
+    model: str = "gpt-5.6-luna", session_key: str = "default", route_id: str = "",
 ) -> dict[str, Any]:
-    executable = os.environ.get("MF5_CODEX_EXECUTABLE", "").strip() or shutil.which("codex") or ""
+    executable = resolve_codex_executable(os.environ.get("MF5_CODEX_EXECUTABLE", ""))
     if not executable:
         raise CodexAppServerFailure("Codex app-server executable is unavailable on the trusted host.")
-    key = _worker_key(session_key, route_id, model, tools)
-    worker: _AppServerWorker | None = None
-    try:
-        worker = _worker(executable, session_key, route_id, model, tools)
-        return worker.complete(
-            messages, tools, completion_only=completion_only, require_tool=require_tool, timeout=timeout,
-        )
-    except (CodexAppServerFailure, OSError) as exc:
-        if worker is not None:
-            _discard_worker(key, worker)
-        if isinstance(exc, CodexAppServerFailure):
-            raise
-        raise CodexAppServerFailure("Codex app-server could not be started.") from exc
+    deadline = time.monotonic() + max(1, min(int(timeout), 300))
+    for attempt in range(2):
+        worker: _AppServerWorker | None = None
+        attempt_model = LUNA_RECOVERY_MODEL if attempt and model == "gpt-5.6-luna" else model
+        key = _worker_key(session_key, route_id, attempt_model, tools)
+        try:
+            worker = _worker(executable, session_key, route_id, attempt_model, tools)
+            remaining = max(1, int(deadline - time.monotonic()))
+            attempt_timeout = min(remaining, PRIMARY_ATTEMPT_MAX_SEC) if attempt == 0 else remaining
+            return worker.complete(
+                messages, tools, completion_only=completion_only, require_tool=require_tool,
+                timeout=attempt_timeout,
+            )
+        except (CodexAppServerFailure, OSError) as exc:
+            recoverable_timeout = bool(
+                attempt == 0 and worker is not None
+                and isinstance(exc, CodexAppServerFailure) and "response timed out" in str(exc).lower()
+                and deadline - time.monotonic() >= 1
+            )
+            recoverable_decision = bool(
+                attempt == 0 and worker is not None
+                and isinstance(exc, CodexDecisionContractFailure)
+                and deadline - time.monotonic() >= 1
+            )
+            if worker is not None:
+                _discard_worker(key, worker)
+            if recoverable_timeout or recoverable_decision:
+                continue
+            if isinstance(exc, CodexAppServerFailure):
+                raise
+            raise CodexAppServerFailure("Codex app-server could not be started.") from exc
+    raise CodexAppServerFailure("Codex app-server response timed out after one worker recovery.")

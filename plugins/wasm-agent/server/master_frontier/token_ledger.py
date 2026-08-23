@@ -3,7 +3,17 @@ from __future__ import annotations
 from typing import Any, Callable
 
 
-STATUS_KEYS = ("context_window_tokens", "rate_limits")
+STATUS_KEYS = ("model", "context_window_tokens", "rate_limits", "status_telemetry")
+CONTEXT_REUSE_KEYS = (
+    "provider_thread_id", "provider_thread_turn", "provider_thread_resumed", "provider_thread_fork_reason",
+    "provider_compaction_generation", "provider_compaction_status", "stable_context_mode", "stable_context_reused",
+)
+
+
+def with_usage_metadata(normalized: dict[str, Any], raw: dict[str, Any]) -> dict[str, Any]:
+    """Retain bounded provider metadata after numeric token normalization."""
+    keys = ("usage_scope", "usage_accuracy", "billable", *STATUS_KEYS, *CONTEXT_REUSE_KEYS)
+    return {**normalized, **{key: raw[key] for key in keys if raw.get(key) is not None}}
 
 
 def with_status_metadata(payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
@@ -13,7 +23,7 @@ def with_status_metadata(payload: dict[str, Any], result: dict[str, Any]) -> dic
     latest = calls[-1] if calls and isinstance(calls[-1], dict) else {}
     metadata = {
         key: total.get(key, latest.get(key))
-        for key in STATUS_KEYS
+        for key in (*STATUS_KEYS, *CONTEXT_REUSE_KEYS)
         if total.get(key, latest.get(key)) is not None
     }
     if not metadata:
@@ -69,8 +79,8 @@ def aggregate_provider_usages(usages: list[dict[str, Any]]) -> tuple[dict[str, A
             if value is not None:
                 component[key] = value
         for key in (
-            "model", "source", "usage_scope", "usage_accuracy", "billable",
-            "transport", "provider_thread_id", "context_window_tokens", "rate_limits",
+            "model", "source", "usage_scope", "usage_accuracy", "billable", "transport",
+            *CONTEXT_REUSE_KEYS, "context_window_tokens", "rate_limits", "status_telemetry",
         ):
             if key in raw:
                 component[key] = raw[key]
@@ -105,7 +115,7 @@ def aggregate_provider_usages(usages: list[dict[str, Any]]) -> tuple[dict[str, A
     if len(provider_threads) == 1 and all(row.get("provider_thread_id") for row in rows):
         aggregate["provider_thread_id"] = next(iter(provider_threads))
     latest = rows[-1]
-    for key in ("context_window_tokens", "rate_limits"):
+    for key in (*STATUS_KEYS, *CONTEXT_REUSE_KEYS):
         if latest.get(key) is not None:
             aggregate[key] = latest[key]
     if all(row.get("usage_scope") == "llm_api_call" for row in rows):
@@ -166,6 +176,39 @@ def with_canonical_usage(result: dict[str, Any] | None, payload: dict[str, Any] 
     return updated
 
 
+def _without_redundant_run_aggregates(calls: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Exclude a run aggregate only when its exact sibling calls prove duplication."""
+    retained = list(calls)
+    for candidate in calls:
+        raw = candidate.get("raw_usage") if isinstance(candidate.get("raw_usage"), dict) else {}
+        declared_calls = _token_int(raw.get("api_calls"))
+        run_id = str(candidate.get("run_id") or "")
+        if not run_id or declared_calls is None or declared_calls <= 1:
+            continue
+        siblings = [
+            call for call in calls
+            if call is not candidate and str(call.get("run_id") or "") == run_id
+        ]
+        if len(siblings) != declared_calls or not all(call.get("exact") for call in siblings):
+            continue
+        keys = ("input_tokens", "output_tokens", "cached_input_tokens", "reasoning_tokens", "total_tokens")
+        if all(
+            _token_int(candidate.get(key)) == sum(int(_token_int(call.get(key)) or 0) for call in siblings)
+            for key in keys
+        ):
+            retained.remove(candidate)
+    return retained
+
+
+def provider_call_components(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Project only individual provider calls for persistence, never run aggregates."""
+    components = payload.get("components") if isinstance(payload.get("components"), dict) else {}
+    return {
+        str(name): usage for name, usage in components.items()
+        if name != "total" and isinstance(usage, dict) and int(_token_int(usage.get("api_calls")) or 1) == 1
+    }
+
+
 def summary_from_calls(
     calls: list[dict[str, Any]],
     *,
@@ -176,6 +219,7 @@ def summary_from_calls(
     sanitize: Callable[[Any, str], str] | None = None,
 ) -> dict[str, Any]:
     clean = sanitize or (lambda value, fallback="": str(value or fallback))
+    calls = _without_redundant_run_aggregates(calls)
     exact_calls = [call for call in calls if call.get("exact")]
     estimated_calls = [call for call in calls if not call.get("exact")]
     sum_key = lambda items, key: sum(int(call.get(key) or 0) for call in items)
@@ -191,6 +235,7 @@ def summary_from_calls(
         "input_tokens": sum_key(exact_calls, "input_tokens"),
         "output_tokens": sum_key(exact_calls, "output_tokens"),
         "cached_input_tokens": sum_key(exact_calls, "cached_input_tokens"),
+        "fresh_input_tokens": max(0, sum_key(exact_calls, "input_tokens") - sum_key(exact_calls, "cached_input_tokens")),
         "reasoning_tokens": sum_key(exact_calls, "reasoning_tokens"),
         "total_tokens": sum_key(exact_calls, "total_tokens"),
         "estimated_input_tokens": sum_key(estimated_calls, "estimated_input_tokens") or None,
@@ -205,7 +250,7 @@ def summary_from_calls(
             break
     for call in reversed(calls):
         raw = call.get("raw_usage") if isinstance(call.get("raw_usage"), dict) else {}
-        found = {key: raw[key] for key in STATUS_KEYS if raw.get(key) is not None}
+        found = {key: raw[key] for key in (*STATUS_KEYS, *CONTEXT_REUSE_KEYS) if raw.get(key) is not None}
         if found:
             summary.update(found)
             break

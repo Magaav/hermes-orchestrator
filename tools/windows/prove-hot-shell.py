@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove the local Windows hot-operation shell is ready for fast debug loops."""
+"""Prove the Windows hot-operation shell is ready for fast debug loops."""
 
 from __future__ import annotations
 
@@ -199,7 +199,7 @@ def main() -> int:
             native_command, payload = COMMANDS[label]
             command_id, queued = queue_command(origin, device_id, native_command, payload, rid, "Windows hot shell proof")
             logs.append(f"queued {label} {command_id}")
-            record = wait_for_result(state_dir, device_id, command_id, wait_sec=args.wait_sec)
+            record = wait_for_result(state_dir, device_id, command_id, wait_sec=args.wait_sec, origin=origin)
             timeline = command_timeline(state_dir, device_id, command_id, record)
             result = unwrap_result(record)
             roundtrip_classification = classify_roundtrip(state_dir, device_id, command_id, record)

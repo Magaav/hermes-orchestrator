@@ -35,6 +35,13 @@ const { masterFrontierObjectiveKind, masterFrontierOutputBudget, masterFrontierR
 }
 
 {
+  assert.strictEqual(masterFrontierObjectiveKind("open the browser widgetr"), "client_action");
+  assert.strictEqual(masterFrontierObjectiveKind("focus that client window"), "client_action");
+  assert.strictEqual(masterFrontierObjectiveKind("send hi to Laura"), "client_action");
+  assert.strictEqual(masterFrontierObjectiveKind("tell me about browser widgets"), "model_decision");
+}
+
+{
   const prompt = "Verify the current widget revision, run its test, inspect the diff, and report the exact changed files.";
   assert.strictEqual(masterFrontierObjectiveKind(prompt), "verification");
   const preservedRevision = "Finish the existing widget fixes. Inspect the current worktree, preserve the correct mutation, run the registered focused test, inspect the current diff, collect scoped proof, and finalize only with revision-bound changed-file evidence.";
@@ -89,6 +96,19 @@ const { masterFrontierObjectiveKind, masterFrontierOutputBudget, masterFrontierR
 {
   const fallback = masterFrontierUsefulFallback("hello", { reason: "structured_action required" });
   assert.strictEqual(fallback, null);
+}
+
+{
+  const fallback = masterFrontierUsefulFallback("why was that answer wrong?", {
+    reason: "v6_no_semantic_progress; phase=final_answer; missing=completion:repo.read,goal:explain",
+    diagnostic: { code: "v6_no_semantic_progress" },
+  });
+  assert.strictEqual(fallback.status, "no_semantic_progress");
+  assert(fallback.answer.includes("repeated decisions made no measurable progress"));
+  assert(fallback.answer.includes("completion:repo.read, goal:explain"));
+  assert(fallback.answer.includes("did not verify a complete answer"));
+  assert(!fallback.answer.includes("planning step"));
+  assert(!fallback.answer.includes("v6_no_semantic_progress"));
 }
 
 {

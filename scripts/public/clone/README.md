@@ -32,6 +32,8 @@ CLI wrappers.
   installer, installer verification, installed-app proof, and native feed
   publication. On Linux aarch64 it also skips Wine resource editing unless
   `HORC_WIN_FAST_RESOURCE_EDIT=1` is set.
+- `horc build prepare-docker` builds the amd64 Wine image with Go, NSIS, and
+  `unar`, matching the launcher's unconditional Go build prerequisite.
 - `delete` prompts interactively unless `--yes` or `HERMES_HORC_ASSUME_YES=1`
   is used.
 - `purge-node` is intentionally two-step: request first, then confirm with the

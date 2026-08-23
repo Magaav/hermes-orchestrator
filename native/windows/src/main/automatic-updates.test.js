@@ -1,9 +1,12 @@
 const assert = require("assert");
 const { automaticUpdatesEnabled, automaticUpdatePayload, startAutomaticUpdateLoop } = require("./automatic-updates");
+const fs = require("fs");
+const path = require("path");
 
 assert.strictEqual(automaticUpdatesEnabled({}), true);
 assert.strictEqual(automaticUpdatesEnabled({ WASM_AGENT_DISABLE_AUTOMATIC_UPDATES: "1" }), false);
 assert.deepStrictEqual(automaticUpdatePayload({}), { automatic: true, applyApproved: true, cacheBypass: true });
+assert.match(fs.readFileSync(path.join(__dirname, "..", "main.js"), "utf8"), /runWindowsSelfUpdate\(sender, opId, \{\s*\.\.\.payload,/s, "native-control must preserve automatic update policy fields");
 
 const timers = [];
 const immediate = [];

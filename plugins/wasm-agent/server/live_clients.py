@@ -14,8 +14,65 @@ SCHEMA = "hermes.wasm_agent.live_clients.v1"
 CLIENT_SCHEMA = "hermes.wasm_agent.live_client.v1"
 ACTIVE_TTL_SEC = 75
 RUNTIME_TYPES = {"pwa", "electron", "android-kotlin"}
-OBSERVABILITY_COMMAND_TYPES = frozenset({"observability_enable", "observability_collect", "observability_disable", "observability_status"})
+OBSERVABILITY_COMMAND_TYPES = frozenset({"observability_enable", "observability_collect", "observability_disable", "observability_status", "observability_browser_surface"})
 OBSERVABILITY_OPERATOR_COMMANDS = {command: command for command in OBSERVABILITY_COMMAND_TYPES}
+BROWSER_CONTROL_COMMANDS = {command: command for command in ("open_widget", "space_open", "browser_navigate", "browser_input_receipt", "browser_pointer_dispatch", "browser_javascript_execute_unrestricted")}
+WINDOWS_FULL_POWER_COMMANDS = {"windows_shell_execute_unrestricted": "windows_shell_execute_unrestricted"}
+BROWSER_CONTROL_COMMAND_TYPES = frozenset(BROWSER_CONTROL_COMMANDS)
+CLIENT_COMMAND_TYPES = OBSERVABILITY_COMMAND_TYPES | BROWSER_CONTROL_COMMAND_TYPES | frozenset(WINDOWS_FULL_POWER_COMMANDS)
+CLIENT_OPERATOR_COMMANDS = {**OBSERVABILITY_OPERATOR_COMMANDS, **BROWSER_CONTROL_COMMANDS, **WINDOWS_FULL_POWER_COMMANDS}
+MAX_POINTER_COORDINATE = 65_535
+STRICT_BROWSER_CONTROL_COMMAND_TYPES = frozenset({"browser_input_receipt", "browser_pointer_dispatch", "browser_javascript_execute_unrestricted", "windows_shell_execute_unrestricted"})
+
+
+def normalize_control_payload(command_type: str, payload: Any, *, command_id: str = "") -> dict[str, Any]:
+    """Validate new Browser controls once, before any renderer receives them."""
+    value = payload if isinstance(payload, dict) else {}
+    if command_type == "browser_input_receipt":
+        if set(value) != {"enabled"} or type(value.get("enabled")) is not bool:
+            raise ValueError("browser_input_receipt requires exactly one boolean enabled field")
+        return {"enabled": value["enabled"]}
+    if command_type == "browser_pointer_dispatch":
+        if set(value) != {"x", "y"}:
+            raise ValueError("browser_pointer_dispatch requires exactly integer x and y fields")
+        if any(type(value.get(axis)) is not int or not 0 <= value[axis] <= MAX_POINTER_COORDINATE for axis in ("x", "y")):
+            raise ValueError(f"browser_pointer_dispatch coordinates must be integers from 0 through {MAX_POINTER_COORDINATE}")
+        normalized = {"x": value["x"], "y": value["y"]}
+        correlation = _safe_id(command_id) if command_id else ""
+        if correlation and correlation != "unknown":
+            normalized["command_id"] = correlation
+        return normalized
+    if command_type == "browser_javascript_execute_unrestricted":
+        if set(value) != {"javascript"} or not isinstance(value.get("javascript"), str) or not value["javascript"].strip():
+            raise ValueError("browser_javascript_execute_unrestricted requires exactly one non-empty javascript field")
+        if len(value["javascript"].encode("utf-8")) > 1_048_576:
+            raise ValueError("browser javascript exceeds the 1048576-byte transport limit")
+        return {"javascript": value["javascript"]}
+    if command_type == "windows_shell_execute_unrestricted":
+        allowed = {"command", "shell", "cwd", "environment", "timeout_ms"}
+        if not set(value) <= allowed or not isinstance(value.get("command"), str) or not value["command"].strip():
+            raise ValueError("windows_shell_execute_unrestricted requires command and only declared execution fields")
+        if len(value["command"].encode("utf-8")) > 1_048_576:
+            raise ValueError("Windows command exceeds the 1048576-byte transport limit")
+        shell = str(value.get("shell") or "powershell").lower()
+        if shell not in {"powershell", "cmd"}:
+            raise ValueError("Windows shell must be powershell or cmd")
+        environment = value.get("environment") or {}
+        if not isinstance(environment, dict) or len(environment) > 128:
+            raise ValueError("Windows environment must be an object with at most 128 entries")
+        timeout_ms = value.get("timeout_ms", 60000)
+        if type(timeout_ms) is not int or not 1000 <= timeout_ms <= 240000:
+            raise ValueError("Windows timeout_ms must be an integer from 1000 through 240000")
+        return {"command": value["command"], "shell": shell, "cwd": str(value.get("cwd") or ""), "environment": {str(k): str(v) for k, v in environment.items()}, "timeout_ms": timeout_ms}
+    return value
+
+
+def operator_control_payload(command_type: str, payload: Any, metadata: dict[str, Any]) -> dict[str, Any]:
+    """Keep strict renderer payloads free of audit metadata carried at command level."""
+    value = payload if isinstance(payload, dict) else {}
+    return value if command_type in STRICT_BROWSER_CONTROL_COMMAND_TYPES else {**value, **metadata}
+
+
 def _clean(value: Any, limit: int = 240) -> str:
     return str(value or "").strip()[:limit]
 
@@ -73,6 +130,8 @@ def normalize_client(payload: dict[str, Any], *, now_epoch: float | None = None)
         "route": _clean(payload.get("route"), 600),
         "title": _clean(payload.get("title"), 160),
         "visibility": _clean(payload.get("visibility"), 20),
+        "space_id": _clean(payload.get("space_id"), 120),
+        "space_name": _clean(payload.get("space_name"), 160),
         "capabilities": _capabilities(payload.get("capabilities"), runtime_type),
         "last_seen_at": seen_at,
         "age_sec": age_sec,

@@ -211,6 +211,35 @@ class V6KernelTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["receipts"][0]["state"], "cancelled")
 
+    def test_goal_action_requires_successful_correlated_write(self) -> None:
+        inspect = contracts.capability({
+            "id": "client.inspect", "kind": "observe", "authority": "client.ui.inspect", "executor": "inspect",
+        })
+        act = contracts.capability({
+            "id": "client.act", "kind": "act", "authority": "client.ui.control", "executor": "act", "mode": "write",
+        })
+        agent = kernel.Kernel(
+            authorities={"client.ui.inspect", "client.ui.control"},
+            completion_requirements={"goal_action"},
+        )
+        agent.register(inspect, lambda _cap, _op: {"ok": True})
+        agent.register(act, lambda _cap, _op: {"ok": True})
+
+        agent.run("Inspect", [{"id": "inspect.only", "cap": "client.inspect", "completes_goal": True}])
+        self.assertEqual(agent.completion_gaps(), ["completion:goal_action"])
+        agent.run("Setup", [{"id": "setup", "cap": "client.act"}])
+        self.assertEqual(agent.completion_gaps(), ["completion:goal_action"])
+        agent.run("Act", [{"id": "send", "cap": "client.act", "completes_goal": True}])
+        self.assertEqual(agent.completion_gaps(), [])
+        restored = kernel.Kernel(
+            authorities={"client.ui.inspect", "client.ui.control"},
+            completion_requirements={"goal_action"},
+        )
+        restored.register(inspect, lambda _cap, _op: {"ok": True})
+        restored.register(act, lambda _cap, _op: {"ok": True})
+        restored.restore(agent.snapshot(agent.run("State", [])["state"]))
+        self.assertEqual(restored.completion_gaps(), [])
+
     def test_shared_cancellation_stops_queued_parallel_operations(self) -> None:
         capability = contracts.capability({"id": "repo.read", "kind": "observe", "authority": "repo.read", "executor": "read"})
         cancel = threading.Event()

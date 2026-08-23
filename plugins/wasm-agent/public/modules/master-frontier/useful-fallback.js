@@ -29,8 +29,23 @@ function userObjectiveSummary(userMessage = "") {
   return objective.length > 240 ? `${objective.slice(0, 237).trim()}...` : objective;
 }
 
+function noProgressDetail(context = {}) {
+  const diagnostic = context.diagnostic && typeof context.diagnostic === "object" ? context.diagnostic : {};
+  const declared = Array.isArray(diagnostic.missing) ? diagnostic.missing : [];
+  const encoded = cleanText(context.reason || diagnostic.message).match(/(?:^|;\s*)missing=([^;]+)/i)?.[1] || "";
+  const missing = (declared.length ? declared : encoded.split(","))
+    .map((item) => cleanText(item))
+    .filter(Boolean)
+    .slice(0, 6);
+  return missing.length ? ` Unresolved requirements: ${missing.join(", ")}.` : "";
+}
+
 export function masterFrontierObjectiveKind(userMessage = "") {
   const prompt = normalizedPrompt(userMessage);
+  const clientActionVerb = /\b(?:click|close|focus|hide|maximize|minimize|navigate|open|post|reload|select|send|show|type|write)\b/;
+  const clientAction = clientActionVerb.test(prompt)
+    && (/\b(?:browser|client|panel|tab|widget|window)\w*\b/.test(prompt)
+      || /^(?:please\s+)?(?:click|close|focus|hide|maximize|minimize|navigate|open|post|reload|select|send|show|type|write)\b/.test(prompt));
   const mutationCommand = /\b(?:add|apply|build|change|create|edit|implement|patch|refactor|remove|repair|ship|update|wire)\b/.test(prompt);
   const explicitMutationDirective = /\b(?:i\s+(?:need|want)\s+you\s+to|please|can\s+you|could\s+you|go\s+ahead\s+and|let(?:'|’)s)\b[^.!?\n]{0,120}\b(?:add|apply|build|change|create|edit|implement|patch|refactor|remove|repair|ship|update|wire)\b/.test(prompt);
   const explicitVerification = /^(?:please\s+)?(?:verify|validat(?:e|es|ed|ing)|test|check|prove)\b/.test(prompt)
@@ -45,6 +60,7 @@ export function masterFrontierObjectiveKind(userMessage = "") {
     && !mutationCommand;
   const verification = explicitVerification || verificationWorkflow;
   if (verification) return "verification";
+  if (clientAction) return "client_action";
   const implementation = explicitMutationDirective || /\b(?:build(?:s|ing)?|built|implement(?:s|ed|ing)?|edit(?:s|ed|ing)?|patch(?:es|ed|ing)?|chang(?:e|es|ed|ing)|fix(?:es|ed|ing)?|repair(?:s|ed|ing)?|creat(?:e|es|ed|ing)|add(?:s|ed|ing)?|remov(?:e|es|ed|ing)|wir(?:e|es|ed|ing)|ship(?:s|ped|ping)?)\b/.test(prompt)
     && /\b(file|code|repo|implementation|component|module|route|ui|test|proof|bug|issue|feature)\w*\b/.test(prompt);
   if (implementation) return "implementation";
@@ -71,6 +87,21 @@ export function masterFrontierUsefulFallback(userMessage = "", context = {}) {
   const surface = cleanText(context.surface, DEFAULT_SURFACE);
   const objective = userObjectiveSummary(context.original_objective || userMessage);
   const failureKind = providerFailureKind(context);
+  if (String(diagnostic.code || "") === "v6_no_semantic_progress" || reason === "v6_no_semantic_progress") {
+    const detail = noProgressDetail(context);
+    return {
+      schema: "hermes.wasm_agent.master_frontier.useful_fallback.v2",
+      status: "no_semantic_progress",
+      answer: `I stopped because repeated decisions made no measurable progress.${detail} I did not verify a complete answer.`,
+      route_id: routeId,
+      surface,
+      reason,
+      objective,
+      objective_kind: masterFrontierObjectiveKind(objective),
+      continuation_context: null,
+      metrics: { objectivePreserved: Boolean(objective), sideEffectReplayGuarded: true, proofHonest: true, resumable: false, failureKind: "no_semantic_progress" },
+    };
+  }
   if (failureKind === "billing_required") {
     return {
       schema: "hermes.wasm_agent.master_frontier.useful_fallback.v2",

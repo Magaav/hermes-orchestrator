@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Shared helpers for local Windows hot-shell proof scripts."""
+"""Shared helpers for Windows hot-shell proof scripts."""
 
 from __future__ import annotations
 
@@ -13,14 +13,15 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlencode
 
 
-DEFAULT_ORIGIN = "http://127.0.0.1:8877"
+DEFAULT_ORIGIN = "https://wa.colmeio.com"
 EXPECTED_HOT_OPS_PROTOCOL = 1
 EXPECTED_SHELL_PROTOCOL = 2
 DEFAULT_WA_ENV_PATH = Path("/local/plugins/wasm-agent/conf/wa.env")
 CLASSIFICATIONS = {
-    "bridge_unreachable": "Start the local wasm-agent backend and installed Windows app.",
+    "bridge_unreachable": "Restore the selected native-control origin and installed Windows client polling.",
     "command_not_polled": "Restart or reopen the installed Windows app; the command was queued but never picked up by native-control polling.",
     "command_polled_not_started": "Inspect the installed app native-control audit; the backend delivered the command but no handler start was observed.",
     "handler_missing": "Install or hot-sync a shell that supports the requested native-control handler.",
@@ -259,12 +260,32 @@ def queue_command(origin: str, device_id: str, command: str, payload: dict[str, 
     return command_id, queued
 
 
-def wait_for_result(state_dir: Path, device_id: str, command_id: str, *, wait_sec: int = 45, poll_sec: float = 1.5) -> dict[str, Any]:
+def remote_command_receipt(origin: str, device_id: str, command_id: str) -> dict[str, Any]:
+    query = urlencode({"device_id": device_id, "command_id": command_id})
+    status, _error = safe_request("GET", f"{origin.rstrip('/')}/native/frontier/status?{query}", timeout=8)
+    receipt = status.get("commandReceipt") if isinstance(status, dict) else None
+    return receipt if isinstance(receipt, dict) else {}
+
+
+def wait_for_result(
+    state_dir: Path,
+    device_id: str,
+    command_id: str,
+    *,
+    wait_sec: int = 45,
+    poll_sec: float = 1.5,
+    origin: str = "",
+) -> dict[str, Any]:
     deadline = time.monotonic() + wait_sec
     while time.monotonic() < deadline:
         found = latest_local_result(state_dir, device_id, command_id)
         if found:
             return found
+        if origin:
+            receipt = remote_command_receipt(origin, device_id, command_id)
+            remote_record = receipt.get("record") if receipt.get("terminal") is True else None
+            if isinstance(remote_record, dict) and remote_record:
+                return remote_record
         time.sleep(max(0.25, poll_sec))
     return {}
 

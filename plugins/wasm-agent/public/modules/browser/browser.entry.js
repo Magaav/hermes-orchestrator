@@ -1,5 +1,5 @@
-import { BROWSER_PORTAL_CAPABILITIES, browserPortalCommand, normalizeBrowserAddress } from "./browser-contract.js";
-import { AVATAR_CHAT_OVERLAY_ID, SHELL_OVERLAY_EVENT } from "../shell-overlay-contract.js?v=20260802-avatar-layer1";
+import { BROWSER_PORTAL_CAPABILITIES, browserPortalCommand, browserSurfaceIntersectsOverlay, normalizeBrowserAddress } from "./browser-contract.js?v=20260815-avatar-always-top1";
+import { AVATAR_CHAT_OVERLAY_ID, SHELL_OVERLAY_EVENT, shellOverlayOcclusionRect } from "../shell-overlay-contract.js?v=20260815-avatar-always-top1";
 
 const STYLE_ID = "wasm-agent-browser-portal-style";
 const STORAGE_KEY = "wasmAgent.browserPortal.v2";
@@ -11,7 +11,7 @@ function installStyles() {
   const link = document.createElement("link");
   link.id = STYLE_ID;
   link.rel = "stylesheet";
-  link.href = "/modules/browser/browser.css?v=20260802-windows-resize2";
+  link.href = "/modules/browser/browser.css?v=20260815-avatar-always-top1";
   document.head.append(link);
 }
 
@@ -55,9 +55,10 @@ export async function mount({ host, mountRoot, onClose } = {}) {
           <input type="text" inputmode="url" aria-label="Web address" placeholder="Enter a secure web address">
         </label>
         <button class="browser-portal-go" type="submit">Go</button>
-        <button class="browser-portal-agent" type="button" data-browser-agent aria-pressed="false">Agent</button>
+        <button class="browser-portal-agent" type="button" data-browser-agent aria-pressed="false" title="Allow bounded native input receipts" disabled>Agent</button>
       </form>
       <section class="browser-portal-stage" data-browser-native-viewport>
+        <img class="browser-portal-snapshot" data-browser-snapshot alt="" hidden>
         <div class="browser-portal-native-placeholder" data-browser-placeholder>
           <p>Connecting to the native Chromium surface…</p>
         </div>
@@ -77,17 +78,25 @@ export async function mount({ host, mountRoot, onClose } = {}) {
   const input = mountRoot.querySelector("input");
   const viewport = mountRoot.querySelector("[data-browser-native-viewport]");
   const placeholder = mountRoot.querySelector("[data-browser-placeholder]");
+  const snapshotImage = mountRoot.querySelector("[data-browser-snapshot]");
   const sessionLabel = mountRoot.querySelector("[data-browser-session-label]");
   const agentButton = mountRoot.querySelector("[data-browser-agent]");
   const abort = new AbortController();
   let closed = false;
   let lastBounds = "";
   let lastVisible = null;
+  let visibilityRevision = 0;
+  let visibilityQueue = Promise.resolve();
+  let overlayRevision = 0;
+  let overlayIntersecting = false;
+  let overlayFrozen = false;
+  let snapshotSupported = false;
+  let inputReceiptSupported = false;
   let frame = 0;
   let geometryBusy = false;
   let geometryQueued = false;
   let shellOverlayOpen = document.querySelector("#agentOverlay")?.dataset.open === "true";
-  host.dataset.nativeSurfaceSuppressed = String(shellOverlayOpen);
+  host.dataset.nativeSurfaceSuppressed = "false";
   let state = null;
 
   input.value = savedAddress();
@@ -96,11 +105,65 @@ export async function mount({ host, mountRoot, onClose } = {}) {
   function renderState(next) {
     if (!next || next.id !== SURFACE_ID) return;
     state = next;
-    host.dataset.browserSession = next.status === "error" ? "error" : (next.loading ? "starting" : "ready");
-    sessionLabel.textContent = next.error || (next.loading ? "Loading" : "Native Chromium ready");
+    const ready = next.status === "ready";
+    host.dataset.browserSession = next.status === "error" ? "error" : (ready ? "ready" : "starting");
+    sessionLabel.textContent = next.error || (ready ? "Native Chromium ready" : "Loading");
     if (next.url) input.value = next.url;
+    if (typeof next.inputReceiptEnabled === "boolean") {
+      agentButton.setAttribute("aria-pressed", String(next.inputReceiptEnabled));
+      agentButton.classList.toggle("is-active", next.inputReceiptEnabled);
+    }
     placeholder.hidden = next.status !== "error";
     if (next.error) placeholder.firstElementChild.textContent = next.error;
+  }
+
+  async function setNativeVisibility(visible) {
+    const desired = Boolean(visible);
+    if (desired === lastVisible) return;
+    lastVisible = desired;
+    const revision = ++visibilityRevision;
+    visibilityQueue = visibilityQueue.catch(() => {}).then(() => invoke("visibility", { visible: desired }));
+    const next = await visibilityQueue;
+    if (revision === visibilityRevision) renderState(next);
+  }
+
+  async function syncOverlaySurface() {
+    const revision = ++overlayRevision;
+    await new Promise((resolve) => requestAnimationFrame(resolve));
+    if (revision !== overlayRevision) {
+      scheduleGeometry();
+      return;
+    }
+    overlayIntersecting = browserSurfaceIntersectsOverlay(
+      viewport.getBoundingClientRect(),
+      shellOverlayOcclusionRect(document.querySelector("#agentOverlay")),
+    );
+    host.dataset.nativeSurfaceSuppressed = String(overlayIntersecting);
+    if (!overlayIntersecting) {
+      overlayFrozen = false;
+      host.dataset.browserOverlayMode = "live-nonoverlap";
+      snapshotImage.hidden = true;
+      snapshotImage.removeAttribute("src");
+      scheduleGeometry();
+      return;
+    }
+    try {
+      if (!snapshotSupported) throw new Error("snapshot_capability_missing");
+      const snapshot = await invoke("snapshot");
+      if (revision !== overlayRevision || !overlayIntersecting) {
+        scheduleGeometry();
+        return;
+      }
+      snapshotImage.src = snapshot.dataUrl;
+      snapshotImage.hidden = false;
+      overlayFrozen = true;
+      host.dataset.browserOverlayMode = shellOverlayOpen ? "frozen-chat-overlap" : "frozen-avatar-overlap";
+    } catch (error) {
+      overlayFrozen = true;
+      host.dataset.browserSnapshot = "unavailable";
+      host.dataset.browserOverlayMode = "fallback-hidden";
+    }
+    if (revision === overlayRevision && overlayFrozen) await setNativeVisibility(false);
   }
 
   async function syncGeometry() {
@@ -123,20 +186,22 @@ export async function mount({ host, mountRoot, onClose } = {}) {
 
   async function syncLatestGeometry() {
     const rect = viewport.getBoundingClientRect();
-    const visible = !shellOverlayOpen && !document.hidden && !host.hidden && rect.width > 1 && rect.height > 1
+    const bounds = surfaceBounds(viewport);
+    const inViewport = !document.hidden && !host.hidden && rect.width > 1 && rect.height > 1
       && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
-    if (visible) {
-      const bounds = surfaceBounds(viewport);
+    const intersects = browserSurfaceIntersectsOverlay(
+      rect,
+      shellOverlayOcclusionRect(document.querySelector("#agentOverlay")),
+    );
+    if (intersects !== overlayIntersecting) void syncOverlaySurface().catch(showError);
+    if (rect.width > 1 && rect.height > 1) {
       const key = JSON.stringify(bounds);
       if (key !== lastBounds) {
         lastBounds = key;
         renderState(await invoke("bounds", { bounds }));
       }
     }
-    if (visible !== lastVisible) {
-      lastVisible = visible;
-      renderState(await invoke("visibility", { visible }));
-    }
+    await setNativeVisibility(inViewport && !overlayFrozen);
   }
 
   function scheduleGeometry() {
@@ -157,9 +222,15 @@ export async function mount({ host, mountRoot, onClose } = {}) {
     abort.signal.addEventListener("abort", offEvent, { once: true });
     try {
       const capabilities = await native.invoke("capabilities");
+      snapshotSupported = capabilities.capabilities?.includes("web_surface.snapshot") === true;
+      inputReceiptSupported = capabilities.capabilities?.includes("web_surface.input_receipt") === true;
+      agentButton.disabled = !inputReceiptSupported;
+      host.dataset.browserSnapshotCapability = snapshotSupported ? "available" : "missing";
+      host.dataset.browserInputReceiptCapability = inputReceiptSupported ? "available" : "missing";
       emit(host, "browser.capabilities", capabilities);
       state = await invoke("create", { url: input.value, bounds: surfaceBounds(viewport) });
       renderState(state);
+      void syncOverlaySurface().catch(showError);
       scheduleGeometry();
     } catch (error) { showError(error); }
   }
@@ -171,32 +242,57 @@ export async function mount({ host, mountRoot, onClose } = {}) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ address: url }));
       renderState(await invoke("navigate", { url }));
       emit(host, "browser.navigate", { url });
-    } catch (error) { showError(error); }
+    } catch (error) {
+      showError(error);
+      emit(host, "browser.navigate.failed", { error: String(error?.message || error).slice(0, 160) });
+    }
   }, { signal: abort.signal });
 
   mountRoot.querySelectorAll("[data-browser-action]").forEach((button) => button.addEventListener("click", async () => {
     try {
       renderState(await invoke("action", { action: button.dataset.browserAction }));
       emit(host, `browser.${button.dataset.browserAction}`);
-    } catch (error) { showError(error); }
+    } catch (error) {
+      showError(error);
+      emit(host, `browser.${button.dataset.browserAction}.failed`, { error: String(error?.message || error).slice(0, 160) });
+    }
   }, { signal: abort.signal }));
 
-  agentButton.addEventListener("click", () => {
+  agentButton.addEventListener("click", async () => {
     const enabled = agentButton.getAttribute("aria-pressed") !== "true";
-    agentButton.setAttribute("aria-pressed", String(enabled));
-    agentButton.classList.toggle("is-active", enabled);
-    emit(host, "browser.agent.set", { enabled });
+    agentButton.disabled = true;
+    try {
+      await invoke("input-receipt", { enabled });
+      agentButton.setAttribute("aria-pressed", String(enabled));
+      agentButton.classList.toggle("is-active", enabled);
+      emit(host, "browser.agent.set", { enabled });
+    } catch (error) {
+      showError(error);
+      emit(host, "browser.agent.set.failed", { error: String(error?.message || error).slice(0, 160) });
+    } finally {
+      agentButton.disabled = !inputReceiptSupported;
+    }
   }, { signal: abort.signal });
 
   mountRoot.querySelector("[data-browser-proof]").addEventListener("click", async () => {
-    try { emit(host, "browser.prove", await invoke("status")); }
+    try {
+      emit(host, "browser.prove", {
+        surface: await invoke("status"),
+        overlayMode: host.dataset.browserOverlayMode || "closed",
+        overlayIntersecting,
+        snapshotCapability: host.dataset.browserSnapshotCapability || "unknown",
+      });
+    }
     catch (error) { showError(error); }
   }, { signal: abort.signal });
 
   const resizeObserver = new ResizeObserver(scheduleGeometry);
   const mutationObserver = new MutationObserver(scheduleGeometry);
+  const agentOverlay = document.querySelector("#agentOverlay");
   resizeObserver.observe(viewport);
+  agentOverlay?.querySelectorAll?.("[data-shell-overlay-occluder]").forEach((element) => resizeObserver.observe(element));
   mutationObserver.observe(host, { attributes: true, attributeFilter: ["class", "hidden", "style"] });
+  if (agentOverlay) mutationObserver.observe(agentOverlay, { attributes: true, attributeFilter: ["data-open", "style", "class"] });
   addEventListener("scroll", scheduleGeometry, { capture: true, passive: true, signal: abort.signal });
   addEventListener("resize", scheduleGeometry, { passive: true, signal: abort.signal });
   document.addEventListener("visibilitychange", scheduleGeometry, { signal: abort.signal });
@@ -204,8 +300,7 @@ export async function mount({ host, mountRoot, onClose } = {}) {
   addEventListener(SHELL_OVERLAY_EVENT, (event) => {
     if (event.detail?.id !== AVATAR_CHAT_OVERLAY_ID) return;
     shellOverlayOpen = Boolean(event.detail.open);
-    host.dataset.nativeSurfaceSuppressed = String(shellOverlayOpen);
-    scheduleGeometry();
+    void syncOverlaySurface().catch(showError);
   }, { signal: abort.signal });
 
   return {

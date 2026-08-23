@@ -105,6 +105,60 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         self.assertEqual(contract["evidence_floor"], "route")
         self.assertIn("kernel.inspect", contract["tools_first"])
 
+    def test_client_action_requires_runtime_acknowledgement(self) -> None:
+        envelope = self.route_envelope("open the browser widget")
+        envelope["objective_kind"] = "client_action"
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "client_action")
+        self.assertEqual(contract["evidence_floor"], "runtime")
+        self.assertIn("client_ack", contract["proof_required"])
+
+    def test_stale_model_decision_promotes_declared_client_action(self) -> None:
+        envelope = self.route_envelope("open the browser widget")
+        envelope["objective_kind"] = "model_decision"
+        envelope["route_contract"]["client_ui"] = {"operations": ["open_widget"]}
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "client_action")
+        self.assertEqual(contract["evidence_floor"], "runtime")
+
+    def test_recipient_action_promotes_without_repeating_client_surface(self) -> None:
+        envelope = self.route_envelope("send hi to Laura")
+        envelope["objective_kind"] = "model_decision"
+        envelope["route_contract"]["client_ui"] = {
+            "operations": ["browser_javascript_execute_unrestricted"],
+        }
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "client_action")
+        self.assertEqual(contract["evidence_floor"], "runtime")
+
+    def test_polite_question_form_send_is_still_a_client_action(self) -> None:
+        envelope = self.route_envelope("can you send hi to Laura?")
+        envelope["objective_kind"] = "conversation"
+        envelope["route_contract"]["client_ui"] = {
+            "operations": ["browser_javascript_execute_unrestricted"],
+        }
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "client_action")
+        self.assertEqual(contract["evidence_floor"], "runtime")
+        self.assertIn("client_ack", contract["proof_required"])
+
+    def test_client_action_words_without_declared_operations_stay_decision(self) -> None:
+        envelope = self.route_envelope("open the browser widget")
+        envelope["objective_kind"] = "model_decision"
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "model_decision")
+        self.assertEqual(contract["evidence_floor"], "conceptual")
+
     def test_explicit_implementation_planning_preserves_read_only_decision_contract(self) -> None:
         envelope = self.route_envelope("fix them all")
         envelope["objective_kind"] = "implementation_planning"

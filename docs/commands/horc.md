@@ -275,8 +275,9 @@ step:
 horc build prepare-docker
 ```
 
-This builds `horc/electron-builder-wine-nsis:jammy` with NSIS and `unar`
-preinstalled. Future `horc build` runs auto-use that local image when
+This builds `horc/electron-builder-wine-nsis:jammy` with Go, NSIS, and `unar`
+preinstalled. Go is required because native asset preparation always rebuilds
+the Windows launcher. Future `horc build` runs auto-use that local image when
 `HORC_DOCKER_IMAGE` is unset, avoiding repeated `apt-get update` and package
 installs inside each disposable builder container.
 

@@ -21,6 +21,10 @@ assert.match(source, /export function externalAppsToHydrate\(apps = \[\], layout
 assert.match(source, /layout\?\.\[app\.id\]\?\.minimized === false/);
 assert.match(source, /export async function hydrateOpenExternalApps\(apps = \[\], layout = \{\}\)/);
 assert.match(source, /Promise\.allSettled/);
+assert.match(source, /export async function ensureExternalAppOpen\(app, currentMinimized, onMinimizedChange\)/);
+assert.match(source, /await ensureExternalAppMounted\(app\);[\s\S]*host\.hidden = false/);
+assert.match(source, /alreadyOpen \? "already_open" : "opened"/);
+assert.match(appSource, /return ensureExternalAppOpen\(app, widgetLayout\(app\.id\)\.minimized/);
 assert.match(windowStateSource, /external-app-unmounted/);
 assert.match(appSource, /const routedPanel = panelFromPath\(\);[\s\S]*if \(routeReconciled\) setPanel\(routedPanel, \{ updateUrl: false \}\);/);
 assert.deepEqual(SPACE_APP_MAPPINGS.home, []);
