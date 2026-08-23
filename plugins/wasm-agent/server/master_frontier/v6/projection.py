@@ -27,6 +27,8 @@ def encode(value: dict[str, Any]) -> str:
     state = value.get("state") if isinstance(value.get("state"), dict) else {}
     if state:
         lines.append("\t".join(("S", str(state.get("id") or ""), str(state.get("rev") or 0), str(state.get("status") or ""), _j(state.get("known") or []), _j(state.get("open") or []), _j(state.get("plan") or []))))
+        for goal in state.get("goals") or []:
+            lines.append("\t".join(("Q", str(goal.get("id") or ""), str(goal.get("cap") or ""), str(goal.get("status") or "pending"), _s(goal.get("outcome")), str(goal.get("operation") or ""))))
     for item in value.get("evidence") or []:
         if isinstance(item, dict):
             lines.append("\t".join(("E", str(item.get("id") or ""), str(item.get("kind") or ""), _s(item.get("subject")), _s(item.get("revision")), _s(item.get("summary")), str(item.get("detail_ref") or ""))))
@@ -63,7 +65,9 @@ def decode(text: str) -> dict[str, Any]:
             elif tag == "C" and len(fields) == 5:
                 result["capabilities"].append({"id": fields[1], "kind": fields[2], "authority": fields[3], "summary": contracts.decode(fields[4])})
             elif tag == "S" and len(fields) == 7:
-                result["state"] = {"id": fields[1], "rev": int(fields[2]), "status": fields[3], "known": contracts.decode(fields[4]), "open": contracts.decode(fields[5]), "plan": contracts.decode(fields[6])}
+                result["state"] = {"id": fields[1], "rev": int(fields[2]), "status": fields[3], "known": contracts.decode(fields[4]), "open": contracts.decode(fields[5]), "plan": contracts.decode(fields[6]), "goals": []}
+            elif tag == "Q" and len(fields) == 6 and isinstance(result.get("state"), dict):
+                result["state"]["goals"].append({"id": fields[1], "cap": fields[2], "status": fields[3], "outcome": contracts.decode(fields[4]), "operation": fields[5]})
             elif tag == "E" and len(fields) == 7:
                 result["evidence"].append({"id": fields[1], "kind": fields[2], "subject": contracts.decode(fields[3]), "revision": contracts.decode(fields[4]), "summary": contracts.decode(fields[5]), "detail_ref": fields[6]})
             elif tag == "P" and len(fields) == 4 and fields[2] == "untrusted-data":

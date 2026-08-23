@@ -17,10 +17,11 @@ download/update, and bridge work.
 | C3 model-led execution harness | implemented-unverified | `MASTER_FRONTIER_V3.md`; V3 focused, session-replay, and integration tests | One capable head chooses mapped load-on-demand tools; the host owns route safety, execution, semantic observations, budget admission, diffs, checks, proof, buffered human output, per-turn function/dataflow trace rows, and progressive exact usage persistence. V5 additionally has session-derived answer-satisfaction fixtures and a route-owned bounded browser/CDP tool. Live server restart/avatar-chat proof remains required. |
 | V4 read-only source investigation | locally verified, replay verified | `MASTER_FRONTIER_V4_SOURCE_INVESTIGATION.md`; `python3 tests/master_frontier_v4_source_investigation.test.py`; `python3 ../../tools/context/evaluate-master-frontier-v4.py` | Explicit compatibility selection; persisted immutable protocol, bounded model-visible evidence, typed re-probe, exact resume, `INVESTIGATION/1`, compound discovery, `EVIDENCE/1`, `COMPLETION/1`, Gate V4, and independent 14-fixture evaluation. V6 remains default. Live provider attempt has not passed; no runtime, deployment, or production claim. |
 | V5 persistent natural-tool coding loop | implemented compatibility/rollback lane; evolution locally verified | `MASTER_FRONTIER_V5.md`; `python3 ../../tools/context/prove-master-frontier-v5-evolution.py`; prior dev source run `wa_run_7cd1e73160514744a1231620ef5a6487` | Compact `MF5/2` context; evidence-first source/runtime modality; exact runtime entities; immediate same-route grounded follow-up action lineage; per-call head/advisory targets plus explicitly input-reserved hard budgets; host-enforced completion-only mode; coverage-aware completion and retry recovery; server-owned restart continuity; preimage-bound transactional edit; registered check; untracked-aware diff; revision-bound proof. Select with `?frontier=v5` or stored `wasmAgent.frontierProtocol=explicit:v5`; legacy bare `v5` migrates to the V6 default and already-created runs retain their persisted protocol. |
-| V6 model-native agent kernel | production verified, browser default | `MASTER_FRONTIER_V6.md`; `python3 ../../tools/context/prove-master-frontier-v6-kernel.py`; `python3 ../../tools/context/prove-master-frontier-v6-live-model.py`; `python3 ../../tools/context/prove-master-frontier-authenticated-canary.py --protocol v6`; `python3 ../../tools/context/prove-master-frontier-v6-client-ui.py` | Canonical durable JSON plus compact `MF6/1` model projection; load-on-demand capabilities/evidence; semantic working memory; conflict-aware parallel DAG; exactly-once restart ledger; generic repository, Electron-client, and scoped MCP adapters; model-authored live commentary; exact measured usage without cumulative token throttling; completion and terminal-integrity gates. Production HTTPS source and installed Electron Browser-widget action are verified. V5 remains an immediate explicit rollback lane. |
+| V6 model-native agent kernel | bounded repository/Electron lanes verified; browser default | `MASTER_FRONTIER_V6.md`; V6 proof ladder; product-readiness report | Fresh repository evidence completed in `37713ms` with GPT-5.6 Sol, 7 provider calls, and exact 26013 total tokens. Fresh production Electron/browser evidence completed in `51107ms` with production-selected GPT-5.6 Luna, 3 calls, and exact 33431 total tokens with client acknowledgement and command receipt verified. Both report zero incorrect, unauthorized, or human-intervention actions. These are bounded lane proofs, not Android, arbitrary MCP, universal repository, installer-identity, or login-persistence proof. V5 remains an immediate explicit rollback lane. |
+| Cross-journey product-readiness evaluator | evaluator verified; product not ready | `python3 ../../tools/context/evaluate-wasm-agent-product-readiness.py --validate-only`; artifact-only evaluator; latest JSON/Markdown report | Composes `repository-agent`, `electron-browser-agent`, and `android-voice-agent` registered promises into schema `wasm-agent.product-readiness.result.v1`. Default execution reads artifacts only; `--run <journey-id>` explicitly serializes child promises. Run `readiness-20260820T145655Z` completed with `evaluationCompleted=true`, `ready=false`: repository and Electron/browser pass, while Android voice fails at `android_device_missing` (`missing-access`) with 11 required metrics missing. |
 | Provider billing failure presentation | implemented-unverified | `node tests/master_frontier_useful_fallback.test.js` | Insufficient balance, credits, funds, billing-required, and payment-required failures are presented as non-resumable provider account problems; the provider reason/link is preserved and saved-run interruption language is suppressed. Live browser proof remains required. |
 | Account auth allowlist | implemented-unverified | auth tests; `conf/README.md` | `ADMIN_EMAIL` and optional `USER_EMAILS`; empty allowlists reject all Google accounts. |
-| Native release feed | implemented-unverified | `plugins/wasm-agent/public/native/releases/latest.json`; `reports/windows/latest/windows-release-feed-check.json` | Current local Windows feed guard fails without `native/windows/release/VERIFY.json`; feed publication is not installed runtime proof. |
+| Native release feed | verified | `public/native/releases/latest.json`; `native/windows/release/VERIFY.json`; `reports/windows/latest/windows-release-feed-check.json` | Current metadata publishes Windows build `win-x64-20260820T195241Z`, matching verified installer SHA `08b46bf491a25f7652a6765e2e7f17add00998cb488bccf8519880ba75ddbed1`; the feed guard passes. |
 | Downloaded native runtime feed | implemented-unverified | `artifacts.runtime.launcher` in release feed; `node plugins/wasm-agent/tests/native_release_feed.test.js` | Requires installed native shells with downloaded-runtime sync before runtime IDs/SHAs are installed evidence. |
 | Windows trusted hot-op feed | implemented-unverified | `artifacts.hotOps.android.hermesWakeProof` in release feed; `node plugins/wasm-agent/tests/native_release_feed.test.js`; `npm run test:windows-hot-ops` | Requires an installed Windows shell with downloaded-hot-op sync before proof can report `hotOpSource=downloaded`. |
 | Frontier operator loop | implemented-unverified | focused server/control tests or gated curl proof | Commands must remain authenticated, audited, bounded, and operation-based. |
@@ -29,10 +30,13 @@ download/update, and bridge work.
 | Wake Word dashboard | implemented-unverified | `WasmAgentNative.getWakeWordState()`; `apply_wake_word_policy`; `GET /native/android/wake-word-state`; focused UI/native smoke checks | Single control center and guided live-tuning loop over the Android foreground wake service, with Train Hermes Wake nested inside and avatar wake feedback from live state. |
 | Embedded-chat speech transcription | implemented-unverified | `node --experimental-vm-modules tests/speech_transcription_module.test.mjs`; `node tests/wasm_agent_smoke.test.js`; browser/device proof still required | Shared PWA/runtime mic button and worker-owned local ASR boundary with versioned Transformers.js 4.2.0, ONNX Runtime WASM, Whisper tiny English fp16 assets, frame-batched AudioWorklet capture with ScriptProcessor fallback, click-time worker/model warmup, same-SHA cache reuse with SHA cache markers, speech-gated pre-roll buffering, noise-adaptive VAD threshold diagnostics, enforced adaptive rolling partials, partial token streaming, duration-capped decode, ONNX graph optimization, and deterministic beam final decode. No native dictation bridge and no remote STT; production runtime proof still requires browser/device mic validation. |
 | Host Browser/CDP | implemented-unverified | security-loop/browser tests | Disabled by default on public HTTPS unless explicitly reviewed. |
-| Unified live-client registry | production verified for Electron UI control | `python3 tests/live_clients.test.py`; `python3 ../../tools/context/prove-master-frontier-v6-client-ui.py`; authenticated `GET /native/control/clients` | Normalizes live/stale PWA, Electron, and Android/Kotlin clients with bounded explicitly declared capabilities. Production proof selects the capable renderer without fabricating defaults or unioning sibling identities, then verifies an acknowledged Browser-widget command. PWA and Android control remain separate runtime claims. |
+| Unified live-client registry | production verified for bounded Electron UI control | `python3 tests/live_clients.test.py`; production authority and V6 client-UI proofs; authenticated `GET /native/control/clients` | Normalizes live/stale PWA, Electron, and Android/Kotlin clients with bounded explicitly declared capabilities. The current Electron journey selected the capable renderer, acknowledged Browser open, and verified the command receipt. It does not establish installed-app login persistence or Android control. |
 | Electron native Browser widget | implemented-unverified | `npm --prefix ../../native/windows/src run test:web-surfaces`; `node tests/browser_widget_native_contract.test.mjs` | `WebContentsView` renders HTTPS web apps with isolated persistent sessions, a browser-compatible Chromium user agent, and visible-viewport-centered initial placement. Source proof only; final NSIS and installed WhatsApp Web login/reopen/navigation proof remain required. |
-| Windows installed-app behavior | implemented-unverified | Windows verifier in `native/windows` | Do not claim fixed from PWA/source tests. |
-| Android runtime behavior | implemented-unverified | `horc simulate android` | Report must name the behavior proven. |
+| Native Browser input receipt | source verified; installed runtime incomplete | `windows-native-browser-input-receipt-source` harness promise; `reports/context/latest/windows-native-browser-input-receipt-runtime.json` | Installed receipt enable passes, but bounded synthetic dispatch failed closed with `surface_not_ready_for_pointer_dispatch` because the Browser surface remained hidden/loading under the overlay policy. No gesture receipt or physical click is claimed. |
+| Master:frontier full-power client execution | installed runtime verified | `master-frontier-full-power-client-source`; `reports/context/latest/master-frontier-full-power-client-runtime.json` | Build `win-x64-20260820T195241Z` executed arbitrary JavaScript in the installed WhatsApp Browser page main world and arbitrary PowerShell under Windows user `Victor`, with exact capability selection and command-correlated receipts. This authority is authenticated, audited, size/time bounded, deliberately not command-allowlisted, not Administrator/SYSTEM elevation, and not exposed to plain PWA or Android clients. |
+| Windows final NSIS/app.asar package | verified | `native/windows/release/VERIFY.json` | Build `win-x64-20260820T195241Z` passed final extracted-NSIS verification. Installer SHA is `08b46bf491a25f7652a6765e2e7f17add00998cb488bccf8519880ba75ddbed1`; app.asar SHA is `9bda2adfbd2fbbcfc71be760ff0553e49884f71594840da01026127e82483dec`. |
+| Windows installed-app behavior | verified for package identity and login persistence | `reports/context/latest/windows-native-browser-input-receipt-runtime.json` | Installed raw app.asar matched `VERIFY.json` through `electron.original-fs`; full app restart preserved exact production Home, `wa_uid`, durable expiration metadata, and authenticated `/auth/session` HTTP 200. Browser gesture receipt remains separately incomplete. |
+| Android runtime behavior | implemented-unverified; readiness failing | product-readiness report; Windows bridge/shell-v2 reports | Current Android voice lane failed `android_device_missing` (`missing-access`) at 21.43% required-metric coverage. Production authority and hot-shell preflight passed on installed Windows build `win-x64-20260815T212625Z`, but no authorized Android device was visible to ADB through the Windows bridge. No full positive/negative wake, responsiveness, avatar, transcription, routing, or acknowledgement pass exists. Cloud-local ADB is not device evidence. |
 
 ## Production Security
 
@@ -44,7 +48,7 @@ download/update, and bridge work.
 | Host Browser WebSocket streams reject missing or cross-origin `Origin` headers. | security tests |
 | Frontier/control routes require admin session, localhost operator access, or `X-Wasm-Agent-Native-Control-Key`. | server routes |
 | Destructive Frontier commands require an explicit destructive gate. | server routes |
-| No arbitrary shell execution through PWA, Frontier, or native bridge. | `AGENTS.md`; native contracts |
+| Full-power execution is restricted to authenticated operator/Master:frontier control and exact-capability installed Electron clients; it is unavailable to unauthenticated routes, plain PWA, and Android. | `AGENTS.md`; native contracts; live-client registry |
 
 ## Read Map
 
@@ -77,6 +81,8 @@ download/update, and bridge work.
 | Web simulation | `horc simulate web` |
 | Avatar-chat route/token quest simulation | `horc simulate web --avatar-quest` |
 | Android simulation | `horc simulate android` |
+| Product readiness, artifact-only | `python3 tools/context/evaluate-wasm-agent-product-readiness.py` |
+| Product readiness, one explicit journey | `python3 tools/context/evaluate-wasm-agent-product-readiness.py --run <repository-agent|electron-browser-agent|android-voice-agent>` |
 | Native feed build | `horc build all` |
 | Windows feed guard | `python3 tools/windows/check-windows-release-feed.py` |
 | Hermes Wake proof | `python3 tools/voice/run-hermes-wake-proof.py --dry-run`; `python3 tools/voice/run-hermes-wake-proof.py --debug` |
@@ -106,6 +112,16 @@ measured byte/token budgets. Keep human-readable observation inspectors and
 debug JSON available for operators, but do not make those expanded structures
 the default model input. Binary protocols, base64 payloads, protobuf, gRPC, raw
 screenshots, full logs, and full client snapshots are not prompt defaults.
+
+The Electron Browser input receipt follows that pull-on-demand rule. It remains
+disabled until the Browser Agent button sends native `input-receipt {enabled}`.
+An `observability_browser_surface` request explicitly asks native surface status
+for `includeInputReceipt: true`, exposes the native enabled state, validates the
+fresh schema-v1 `pointer.primary_gesture` / `observed_pre_dispatch` receipt, and
+projects it as `browser.input_receipt` with proof marker
+`native.web_surface.input_receipt`. Missing, expired, malformed, disabled, or
+non-requested receipts remain absent or `null`; they are never added to the
+always-on model context or persisted interaction trail.
 
 Production-grade proof for this direction must show the old and new baseline
 context bytes/tokens, preserve answer/action quality on representative
@@ -182,25 +198,37 @@ WASM/WebGPU path.
 
 | Platform | Current local feed/evidence | Status | Missing proof |
 | --- | --- | --- | --- |
-| Windows | Local feed build `win-x64-20260614T003930Z`, shell SHA `b978a1eae03d409cf891aacd36e11f0c2521a855388df02e3faa3b35f9632195`, installer `WASM-Agent-Setup-x64-0.1.0-20260614T003930Z.exe` | implemented-unverified | Recreate `native/windows/release/VERIFY.json`, rerun feed guard, install/restart, then installed hot-shell runtime proof |
-| Android | Local feed build `android-universal-20260614T141259Z`, SHA `2757cfcb3c300eb7875065bd1558e9f08eb381d14dfed4c51d913259c3bceca6` | implemented-unverified | Package signer/string proof and OAuth runtime proof |
+| Windows | Feed/install build `win-x64-20260820T195241Z`; installer SHA `08b46bf491a25f7652a6765e2e7f17add00998cb488bccf8519880ba75ddbed1`; extracted app.asar SHA `9bda2adfbd2fbbcfc71be760ff0553e49884f71594840da01026127e82483dec` | final package and full-power Browser/Windows-user execution verified; prior login-persistence proof remains historical to build `175835`; Browser gesture incomplete | Re-run installed raw-app.asar/session proof on `195241`, then reconcile Browser gesture readiness separately |
+| Android | Local feed build `android-universal-20260626T160446Z`, SHA `a65ceb358db42ce0b51db77fa6aa49568288ddb602ca5326caccf1257379dac9` | implemented-unverified | Feed labels it `not-runtime-verified`; current readiness lane has no complete Windows-bridge device/wake proof |
 | Downloaded runtime | `native-runtime/launcher` bundle under `/native/releases/runtime/launcher/` | implemented-unverified | Install/prove a shell containing downloaded-runtime sync and report active runtime ID/SHA |
 | Windows hot ops | Hermes and diagnostics bundles under `/native/releases/hot-ops/` | implemented-unverified | Install/prove a Windows shell containing downloaded-hot-op sync; current installed proof may still be bundled |
 | Web | `web-20260612T131334Z` in feed | implemented-unverified | `horc simulate web` |
 
 ## Durable Next Step
 
-Current next action: trigger Go Native / Check Update, install/restart the
-feed-published Windows hot-op shell, then run the canonical proof sequence:
-`python3 tools/windows/prove-hot-shell.py`,
-`python3 tools/doctor/wasm-agent-doctor.py`,
-`python3 tools/voice/run-hermes-wake-proof.py --dry-run`, and
-`python3 tools/voice/run-hermes-wake-proof.py --debug`.
+Current next action: restore an authorized Android device to ADB visibility
+through the installed Windows bridge. The Android journey failed with typed
+blocker `android_device_missing` (`missing-access`) after production authority
+and hot-shell preflight passed on installed Windows build
+`win-x64-20260815T212625Z`. Do not use cloud-local `adb devices` as a
+substitute.
 
-Do not claim installed Windows shell proof from source tests, build success,
-`win-unpacked`, or feed presence. The installed local bridge must pass
-`prove-hot-shell.py` before Hermes wake proof/debug results are treated as
-Android wake evidence.
+After that prerequisite is observable, rerun only the failing journey and
+compare it with the preserved baseline:
+
+```bash
+python3 tools/context/evaluate-wasm-agent-product-readiness.py \
+  --run android-voice-agent \
+  --compare reports/context/product-readiness/20260820T145655Z.json
+```
+
+Do not rebuild or reinstall merely to refresh readiness. A rebuild is warranted
+only if the repaired proof identifies a missing native primitive, permission,
+service/manifest contract, native library, signing boundary, or package change.
+The current aggregate remains `ready=false` until the Android lane measures and
+passes positive/negative wake trials, duplicate/false-wake counts, effective
+threshold, responsiveness, avatar/listening/transcription/routing latency, and
+final acknowledgement.
 
 The active Hermes wake debug question is whether spoken "Hermes" fails because
 the wake threshold is not crossed, the wake event is not emitted, or command

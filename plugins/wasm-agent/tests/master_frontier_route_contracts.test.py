@@ -40,6 +40,19 @@ class MasterFrontierRouteContractTests(unittest.TestCase):
                 self.assertNotIn(entity_id, seen, f"{entity_id}: {seen.get(entity_id)} and {contract['route_id']}")
                 seen[entity_id] = contract["route_id"]
 
+        self.assertEqual(seen["frederico"], "hermes-node.frederico.runtime")
+
+    def test_frederico_node_is_read_only_and_route_owned(self) -> None:
+        contracts = {item["route_id"]: item for item in routes.load_contracts(REGISTRY_PATH, PLUGIN_ROOT)}
+        contract = contracts["hermes-node.frederico.runtime"]
+        self.assertEqual(contract["workspace_root"], "/local/agents/nodes/frederico")
+        self.assertEqual(contract["allowed_write_roots"], [])
+        entity = contract["entities"][0]
+        self.assertEqual(entity["id"], "frederico")
+        self.assertEqual(entity["name"], "Frederico Clinical Avatar")
+        self.assertEqual(entity["kind"], "hermes-node")
+        self.assertEqual(entity["node_id"], "frederico")
+
     def test_known_runtime_entities_survive_normalization(self) -> None:
         contracts = {item["route_id"]: item for item in routes.load_contracts(REGISTRY_PATH, PLUGIN_ROOT)}
         expected = {

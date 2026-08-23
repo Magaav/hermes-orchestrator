@@ -8,9 +8,9 @@
       "workspace_root": ".",
       "browser_entry_url": "https://wa.colmeio.com/",
       "client_ui": {
-        "runtime_types": ["electron"],
+        "runtime_types": ["electron", "pwa", "android-kotlin"],
         "widget_ids": ["browser"],
-        "operations": ["inspect", "open_widget", "browser_navigate", "command_status"]
+        "operations": ["inspect", "browser_inspect", "open_widget", "space_open", "browser_navigate", "browser_input_receipt", "browser_pointer_dispatch", "browser_javascript_execute_unrestricted", "windows_shell_execute_unrestricted", "command_status"]
       },
       "allowed_read_roots": ["."],
       "allowed_write_roots": ["."],
@@ -592,6 +592,65 @@
           "command": ["python3", "tests/bridge_routes.test.py"],
           "timeout_sec": 90,
           "description": "Focused native-control and bridge route tests"
+        }
+      ]
+    },
+    {
+      "route_id": "hermes-node.frederico.runtime",
+      "surface": "frederico-clinical-avatar",
+      "owner": "hermes-runtime/frederico",
+      "workspace_root": "/local/agents/nodes/frederico",
+      "allowed_read_roots": [
+        "/local/agents/nodes/frederico",
+        "/local/datas/frederico"
+      ],
+      "allowed_write_roots": [],
+      "likely_paths": [
+        ".hermes/NODE_RUNTIME_CONTRACT.md",
+        "workspace",
+        "/local/datas/frederico"
+      ],
+      "lookup_handles": [
+        "route.files",
+        "runtime.entity",
+        "run.timeline",
+        "proof.collect"
+      ],
+      "caps": [
+        "repo.read",
+        "runtime.inspect",
+        "proof.report"
+      ],
+      "entities": [
+        {
+          "id": "frederico",
+          "name": "Frederico Clinical Avatar",
+          "kind": "hermes-node"
+        }
+      ],
+      "provider_policy": {
+        "default": "local-first",
+        "hermes": "bounded-skill-only",
+        "missing_route": "fail"
+      },
+      "budget": {
+        "head_tokens_max": 3000,
+        "provider_tokens_max": 8000,
+        "api_calls_max": 4,
+        "wall_ms_max": 90000
+      },
+      "proof": [
+        "route_id",
+        "workspace_root",
+        "runtime_entity",
+        "token_ledger"
+      ],
+      "checks": [
+        {
+          "id": "frederico-runtime-contract",
+          "command": ["python3", "-c", "from pathlib import Path; assert Path('/local/agents/nodes/frederico/.hermes/NODE_RUNTIME_CONTRACT.md').exists(); assert Path('/local/datas/frederico').exists()"],
+          "timeout_sec": 10,
+          "description": "Frederico runtime route roots and contract exist"
         }
       ]
     },

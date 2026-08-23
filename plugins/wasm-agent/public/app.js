@@ -1,7 +1,7 @@
 import { MODULE_DEFINITIONS } from "./modules/index.js?v=20260622-android-responsive35";
 import { startDevHmr } from "./modules/hmr/dev-hmr.js";
 import { createWisSandbox } from "./modules/wis/engine.js";
-import { isMasterFrontierTarget, masterFrontierNodeId, masterFrontierSelectionTarget } from "./modules/master-frontier/target.js";
+import { defaultAgentSelectionTarget, isMasterFrontierTarget, masterFrontierNodeId, masterFrontierSelectionTarget, normalizeAgentSelectionPreference } from "./modules/master-frontier/target.js";
 import { MASTER_FRONTIER_CAPS, MASTER_FRONTIER_OUTPUT_SCHEMA, masterFrontierAllowedActions } from "./modules/master-frontier/protocol.js";
 import { createAgentSessionRow } from "./modules/assistant/session-row.js";
 import { serializeAgentSessions } from "./modules/assistant/session-persistence.js?v=20260728-verification-workflow";
@@ -11,17 +11,18 @@ import { MASTER_FRONTIER_V3_SCHEMA, masterFrontierV3Instructions, masterFrontier
 import { isMasterFrontierTimelineAction, masterFrontierDecisionCost, masterFrontierNewInputTokens, masterFrontierTimelineIcon } from "./modules/master-frontier/timeline.js?v=20260806-v6-cost1";
 import { masterFrontierCommentaryFromAction, masterFrontierLiveStepFromAction, masterFrontierLiveStepFromPayload } from "./modules/master-frontier/live-commentary.js?v=20260803-codex-commentary1";
 import { masterFrontierActivityText, masterFrontierInitialCommentary, showMasterFrontierRunActivity } from "./modules/master-frontier/activity-presentation.js?v=20260806-codex-stack2";
-import { mergeMasterFrontierStatusUsage, refreshMasterFrontierStatus, renderMasterFrontierStatusPanel } from "./modules/master-frontier/status-panel.js?v=20260806-codex-status6";
+import { mergeMasterFrontierSessionStatusDiagnostics, mergeMasterFrontierStatusUsage, refreshMasterFrontierStatus, renderMasterFrontierStatusPanel } from "./modules/master-frontier/status-panel.js?v=20260822-thread-session-tokens1";
 import { markMasterFrontierInterrupted, masterFrontierContinuationContext, masterFrontierFailureDisposition, masterFrontierPartialReplyFromError, masterFrontierPartialReplyFromPending, recoverMasterFrontierFinal, requiredMasterFrontierContinuationContext, resolvePendingAgentRunId } from "./modules/master-frontier/continuation.js?v=20260804-frontier-modality2";
 import { masterFrontierChangeDiagnostics, renderMasterFrontierChangeEvidence } from "./modules/master-frontier/change-evidence.js";
 import { masterFrontierRouteProofFromFinal } from "./modules/master-frontier/route-proof.js?v=20260806-v6-latency1";
-import { SPACE_APP_DEFINITIONS, SPACE_APP_MAPPINGS, hydrateOpenExternalApps, openExternalAppFromIcon, installExternalAppHosts } from "./modules/app-registry.js?v=20260804-video-v1";
+import { SPACE_APP_DEFINITIONS, SPACE_APP_MAPPINGS, ensureExternalAppOpen, hydrateOpenExternalApps, openExternalAppFromIcon, installExternalAppHosts } from "./modules/app-registry.js?v=20260820-native-input-receipt2";
 import { applyWidgetWindowState } from "./modules/widget-window-state.js";
 import { widgetDimensionLimits } from "./modules/widget-dimensions.js";
-import { startClientPresence } from "./modules/client-presence.js?v=20260806-frontier-protocol1";
+import { startClientPresence } from "./modules/client-presence.js?v=20260820-active-space1";
 import { installResourceProfiler } from "./modules/performance/resource-profiler.js";
 import { applyWidgetIcon, widgetIconDataUri } from "./modules/widget-icons.js";
-import { homeCleanWidgetLayout, initialVisibleWidgetPosition } from "./modules/space-widget-policy.js";
+import { cloneSpaceWidgetLayout, closeUnpositionedWidgets, homeCleanWidgetLayout, initialVisibleWidgetPosition, mappedWidgetIdsForSpace, organizedSpaceAppPositions } from "./modules/space-widget-policy.js?v=20260820-durable-open1";
+import { openSpaceByReference } from "./modules/space-control.js";
 import { ensureWidgetResizeHandles, resizedWidgetRect } from "./modules/widget-window-contract.js?v=20260802-windows-resize2";
 import { publishAvatarChatLayer } from "./modules/shell-overlay-contract.js?v=20260802-avatar-layer1";
 import { latestObservationEvents, observationBrowserProjection, observationBrowserSummary, observationEventCounts } from "./modules/observation/module.js?v=20260803-observation-contract1";
@@ -268,7 +269,6 @@ try {
 } catch {
   // Build marker is diagnostic only.
 }
-
 function applyWisCameraArtifactRuntime(module = {}) {
   WIS_CAMERA_ARTIFACT_SCHEMA = module.WIS_CAMERA_ARTIFACT_SCHEMA || WIS_CAMERA_ARTIFACT_SCHEMA;
   WIS_CAMERA_ARTIFACT_BUILD = module.WIS_CAMERA_ARTIFACT_BUILD || WIS_CAMERA_ARTIFACT_BUILD;
@@ -340,7 +340,6 @@ function applyWisCameraArtifactRuntime(module = {}) {
     lazyLoaded: true,
   });
 }
-
 function loadWisCameraArtifactRuntime(reason = "lazy") {
   if (wisCameraArtifactRuntimePromise) return wisCameraArtifactRuntimePromise;
   wisCameraArtifactRuntimePromise = import("./modules/wis/artifacts/camera.js")
@@ -8868,6 +8867,7 @@ function defaultWidgetLayoutForPanel(panel = state.activePanel) {
 function layoutKeysForPanel(panel = state.activePanel) {
   return new Set([
     "__canvas",
+    "__apps",
     ...spaceApps(panel).map((app) => app.id),
     ...Object.keys(FIXED_WIDGET_LAYOUT),
   ]);
@@ -8884,7 +8884,7 @@ function sanitizeWidgetLayoutForPanel(layout, panel = state.activePanel) {
 function saveWidgetLayout() {
   const spaceId = activeSpaceStorageId();
   state.widgetLayout = sanitizeWidgetLayoutForPanel(state.widgetLayout);
-  state.spaceWidgetLayouts[spaceId] = state.widgetLayout;
+  state.spaceWidgetLayouts[spaceId] = cloneSpaceWidgetLayout(state.widgetLayout);
   saveLocalSpaceWidgetLayouts();
 }
 
@@ -8893,8 +8893,9 @@ function applySpaceWidgetLayout(panel = state.activePanel) {
   const layout = state.spaceWidgetLayouts[spaceId];
   state.widgetLayout = {
     ...defaultWidgetLayoutForPanel(panel),
-    ...sanitizeWidgetLayoutForPanel(layout, panel),
+    ...cloneSpaceWidgetLayout(sanitizeWidgetLayoutForPanel(layout, panel)),
   };
+  state.widgetLayout = closeUnpositionedWidgets(state.widgetLayout, spaceApps(panel).map((app) => app.id));
   state.widgetLayout = homeCleanWidgetLayout(state.widgetLayout, spaceId);
   const metadataArea = userSpaceAreaForPanel(panel);
   const area = metadataArea
@@ -15731,12 +15732,12 @@ function isGlobalAgentNodeId(nodeId) {
 }
 
 function defaultAgentTargetNode() {
-  return AGENT_FRONTIER_NODE_ID;
+  return defaultAgentSelectionTarget({ masterTargetId: AGENT_MASTER_FRONTIER_TARGET_ID, frontierNodeId: AGENT_FRONTIER_NODE_ID, isAdmin: isAdminUser() });
 }
 
 function readAgentTargetNodeSessionPreference() {
   try {
-    return cleanText(window.sessionStorage?.getItem(AGENT_TARGET_NODE_SESSION_STORAGE_KEY) || "", "");
+    return normalizeAgentSelectionPreference(window.sessionStorage?.getItem(AGENT_TARGET_NODE_SESSION_STORAGE_KEY), { masterTargetId: AGENT_MASTER_FRONTIER_TARGET_ID, frontierNodeId: AGENT_FRONTIER_NODE_ID, isAdmin: isAdminUser() });
   } catch {
     return "";
   }
@@ -17973,15 +17974,12 @@ function appDefinitionById(widgetId) {
   return SPACE_APP_DEFINITIONS.find((app) => app.id === widgetId) || null;
 }
 
-function spaceAppScope(panel = state.activePanel) {
-  const spaceId = activeSpaceStorageId(panel);
-  if (spaceId === "home") return "home";
-  if (spaceId === "admin") return "admin";
-  return "user";
-}
-
 function mappedAppIdsForPanel(panel = state.activePanel) {
-  return new Set(SPACE_APP_MAPPINGS[spaceAppScope(panel)] || []);
+  const spaceId = activeSpaceStorageId(panel);
+  const scope = spaceId === "home" ? "home" : spaceId === "admin" ? "admin" : "user";
+  const available = SPACE_APP_MAPPINGS[scope] || [];
+  if (scope !== "user") return new Set(available);
+  return mappedWidgetIdsForSpace(state.spaceWidgetLayouts?.[spaceId], available);
 }
 
 function widgetAvailableInPanel(widgetId, panel = state.activePanel) {
@@ -18163,48 +18161,6 @@ function snapToAppGrid(value) {
   return Math.round(Number(value || 0) / APP_ICON_GRID_PX) * APP_ICON_GRID_PX;
 }
 
-function appRect(left, top, width, height) {
-  return { left, top, right: left + width, bottom: top + height };
-}
-
-function appRectsOverlap(a, b) {
-  const gap = 0;
-  const tolerance = APP_ICON_COLLISION_TOLERANCE_PX;
-  return a.left < b.right + gap - tolerance
-    && a.right + gap > b.left + tolerance
-    && a.top < b.bottom + gap - tolerance
-    && a.bottom + gap > b.top + tolerance;
-}
-
-function appPositionFits(left, top, width, height, occupied) {
-  const rect = appRect(left, top, width, height);
-  return !occupied.some((item) => appRectsOverlap(rect, item));
-}
-
-function nearestOpenAppPosition(desiredLeft, desiredTop, width, height, maxLeft, maxTop, occupied) {
-  const startLeft = clamp(Math.round(Number(desiredLeft || 0)), SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
-  const startTop = clamp(Math.round(Number(desiredTop || 0)), SPACE_CANVAS_EDGE_INSET_PX, maxTop);
-  if (appPositionFits(startLeft, startTop, width, height, occupied)) return { left: startLeft, top: startTop };
-  const maxRadius = Math.max(maxLeft, maxTop) + width + height;
-  for (let radius = APP_ICON_GRID_PX; radius <= maxRadius; radius += APP_ICON_GRID_PX) {
-    for (let dx = -radius; dx <= radius; dx += APP_ICON_GRID_PX) {
-      for (const dy of [-radius, radius]) {
-        const left = clamp(snapToAppGrid(startLeft + dx), SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
-        const top = clamp(snapToAppGrid(startTop + dy), SPACE_CANVAS_EDGE_INSET_PX, maxTop);
-        if (appPositionFits(left, top, width, height, occupied)) return { left, top };
-      }
-    }
-    for (let dy = -radius + APP_ICON_GRID_PX; dy <= radius - APP_ICON_GRID_PX; dy += APP_ICON_GRID_PX) {
-      for (const dx of [-radius, radius]) {
-        const left = clamp(snapToAppGrid(startLeft + dx), SPACE_CANVAS_EDGE_INSET_PX, maxLeft);
-        const top = clamp(snapToAppGrid(startTop + dy), SPACE_CANVAS_EDGE_INSET_PX, maxTop);
-        if (appPositionFits(left, top, width, height, occupied)) return { left, top };
-      }
-    }
-  }
-  return { left: startLeft, top: startTop };
-}
-
 function createSpaceAppButton(app) {
   const button = document.createElement("button");
   button.className = "space-app-button";
@@ -18245,52 +18201,51 @@ function positionSpaceAppButton(button, app, index, occupied = []) {
   const label = button.querySelector(".space-app-icon + span");
   if (label) label.textContent = widgetShort(app.id);
   const viewportRect = spaceLogicalRect();
-  const defaultLeftPct = 0.04 + (index % 3) * 0.088;
-  const defaultTopPct = 0.12 + Math.floor(index / 3) * 0.14;
   const buttonWidth = button.offsetWidth || 62;
   const buttonHeight = button.offsetHeight || 70;
-  const maxLeftStable = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.width - buttonWidth - SPACE_CANVAS_EDGE_INSET_PX);
-  const maxTopStable = Math.max(SPACE_CANVAS_EDGE_INSET_PX, viewportRect.height - buttonHeight - SPACE_CANVAS_EDGE_INSET_PX);
   const hasSavedPixelPosition = Number.isFinite(layout.appLeftPx) && Number.isFinite(layout.appTopPx);
-  const desiredLeft = Number.isFinite(layout.appLeftPx)
-    ? layout.appLeftPx
-    : (Number.isFinite(layout.appLeftPct) ? layout.appLeftPct : defaultLeftPct) * viewportRect.width;
-  const desiredTop = Number.isFinite(layout.appTopPx)
-    ? layout.appTopPx
-    : (Number.isFinite(layout.appTopPct) ? layout.appTopPct : defaultTopPct) * viewportRect.height;
   if (layout.appOrganized === true || hasSavedPixelPosition) {
-    const left = clamp(Math.round(Number(desiredLeft || 0)), 0, Math.max(0, viewportRect.width - buttonWidth));
-    const top = clamp(Math.round(Number(desiredTop || 0)), 0, Math.max(0, viewportRect.height - buttonHeight));
+    const left = clamp(Math.round(Number(layout.appLeftPx || 0)), 0, Math.max(0, viewportRect.width - buttonWidth));
+    const top = clamp(Math.round(Number(layout.appTopPx || 0)), 0, Math.max(0, viewportRect.height - buttonHeight));
     layout.appLeftPx = left;
     layout.appTopPx = top;
     layout.appLeftPct = left / Math.max(1, viewportRect.width);
     layout.appTopPct = top / Math.max(1, viewportRect.height);
     button.style.left = `${logicalToScreenPx(left)}px`;
     button.style.top = `${logicalToScreenPx(top)}px`;
-    occupied.push(appRect(left, top, buttonWidth, buttonHeight));
     return;
   }
-  const { left, top } = nearestOpenAppPosition(desiredLeft, desiredTop, buttonWidth, buttonHeight, maxLeftStable, maxTopStable, occupied);
+  const { left = 0, top = 0 } = occupied[index] || {};
   layout.appLeftPx = left;
   layout.appTopPx = top;
   layout.appLeftPct = left / Math.max(1, viewportRect.width);
   layout.appTopPct = top / Math.max(1, viewportRect.height);
   button.style.left = `${logicalToScreenPx(left)}px`;
   button.style.top = `${logicalToScreenPx(top)}px`;
-  occupied.push(appRect(left, top, buttonWidth, buttonHeight));
 }
 
 function renderAppLayer() {
   if (!els.appLayer) return;
   const apps = spaceApps();
-  const occupied = [];
+  const board = spaceSurface();
+  const boardRect = spaceLogicalRect(board);
+  const fallback = organizedSpaceAppPositions({
+    count: apps.length,
+    boardWidth: boardRect.width,
+    boardHeight: boardRect.height,
+    visibleWidth: els.spaceViewport.clientWidth / canvasDistance(),
+    visibleHeight: els.spaceViewport.clientHeight / canvasDistance(),
+    scrollLeft: screenToLogicalPx(els.spaceViewport.scrollLeft),
+    scrollTop: screenToLogicalPx(els.spaceViewport.scrollTop),
+    topInset: organizerTopInsetPx(board),
+  }).positions;
   const nodes = apps.map((app, index) => {
     let button = state.appButtonCache.get(app.id);
     if (!button) {
       button = createSpaceAppButton(app);
       state.appButtonCache.set(app.id, button);
     }
-    positionSpaceAppButton(button, app, index, occupied);
+    positionSpaceAppButton(button, app, index, fallback);
     return button;
   });
   els.appLayer.replaceChildren(...nodes);
@@ -18318,38 +18273,22 @@ function organizeSpaceAppsInViewport() {
   if (!apps.length) return;
   const buttonWidth = 62;
   const buttonHeight = 70;
-  const gapX = 0;
-  const gapY = 0;
-  const leftInset = 0;
   const topInset = organizerTopInsetPx(board);
   const boardRect = spaceLogicalRect(board);
   const boardWidth = Math.max(buttonWidth, boardRect.width);
   const boardHeight = Math.max(buttonHeight, boardRect.height);
   const visibleWidth = Math.max(1, viewport.clientWidth / canvasDistance());
   const visibleHeight = Math.max(1, viewport.clientHeight / canvasDistance());
-  const visibleColumns = Math.max(1, Math.floor((Math.max(buttonWidth, visibleWidth - leftInset) + gapX) / (buttonWidth + gapX)));
-  const boardColumns = Math.max(1, Math.floor((boardWidth + gapX) / (buttonWidth + gapX)));
-  const columns = Math.min(apps.length, visibleColumns, boardColumns);
-  const rows = Math.ceil(apps.length / columns);
-  const blockWidth = columns * buttonWidth + Math.max(0, columns - 1) * gapX;
-  const blockHeight = rows * buttonHeight + Math.max(0, rows - 1) * gapY;
-  const rawStartLeft = snapToAppGrid(screenToLogicalPx(viewport.scrollLeft) + leftInset);
-  const startLeft = clamp(rawStartLeft, 0, Math.max(0, boardWidth - blockWidth));
-  const rawStartTop = snapToAppGrid(screenToLogicalPx(viewport.scrollTop) + topInset);
-  const startTop = clamp(rawStartTop, 0, Math.max(0, boardHeight - blockHeight));
+  const organized = organizedSpaceAppPositions({ count: apps.length, boardWidth, boardHeight, visibleWidth, visibleHeight, scrollLeft: screenToLogicalPx(viewport.scrollLeft), scrollTop: screenToLogicalPx(viewport.scrollTop), topInset, buttonWidth, buttonHeight });
   apps.forEach((app, index) => {
-    const column = index % columns;
-    const row = Math.floor(index / columns);
     const layout = widgetLayout(app.id);
-    const left = Math.round(startLeft + column * (buttonWidth + gapX));
-    const top = Math.round(startTop + row * (buttonHeight + gapY));
+    const { left, top } = organized.positions[index];
     layout.appLeftPx = left;
     layout.appTopPx = top;
     layout.appOrganized = true;
     layout.appLeftPct = left / Math.max(1, boardWidth);
     layout.appTopPct = top / Math.max(1, boardHeight);
   });
-  const overflowRows = Math.max(0, rows - Math.max(1, Math.floor((visibleHeight - topInset + gapY) / (buttonHeight + gapY))));
   renderAppLayer();
   renderSpaceMiniMap();
   saveWidgetLayout();
@@ -18359,8 +18298,8 @@ function organizeSpaceAppsInViewport() {
     data: {
       space_id: activeSpaceStorageId(),
       app_count: apps.length,
-      columns,
-      overflow_rows: overflowRows,
+      columns: organized.columns,
+      overflow_rows: organized.overflowRows,
       scroll_left: viewport.scrollLeft,
       scroll_top: viewport.scrollTop,
     },
@@ -25129,6 +25068,8 @@ async function callMasterFrontierDirectHead(message, transcript = [], observatio
     session_id: activeAgentSession().id,
     turn_id: cleanText(options.turnId || "", ""),
     space_id: activeSpaceStorageId(),
+    space_name: cleanText(options.activeSpace?.display_name || options.activeSpace?.name || "", ""),
+    active_space: options.activeSpace || undefined,
     route_id: envelope.route_id,
     envelope,
     protocol: protocolSelection.protocol,
@@ -29076,7 +29017,8 @@ function renderAgentDiagnostics(diagnostics = {}) {
   );
   renderMasterFrontierStatusPanel(document.querySelector("#agentCodexStatus"), {
     sessionId: activeAgentSession()?.id || "",
-    diagnostics,
+    diagnostics: mergeMasterFrontierSessionStatusDiagnostics(diagnostics, activeAgentSession()?.messages || []),
+    sessionSummary,
   });
 }
 
@@ -40952,7 +40894,7 @@ function setPanel(panel, options = {}) {
     void stopSharedVoice({ reason: "space-changed" });
   }
   panelSwitchTimer?.mark("shared-voice");
-  state.spaceWidgetLayouts[activeSpaceStorageId(previous)] = state.widgetLayout;
+  state.spaceWidgetLayouts[activeSpaceStorageId(previous)] = cloneSpaceWidgetLayout(state.widgetLayout);
   panelSwitchTimer?.mark("capture-layout");
   if (!androidNative) saveLocalSpaceWidgetLayouts();
   panelSwitchTimer?.mark(androidNative ? "defer-save-layout" : "save-layout");
@@ -42678,11 +42620,13 @@ async function main() {
   nativeShellDiagnostic("main_started");
   startNativeAuthDiagnosticHeartbeat();
   startClientPresence({
+    getActiveSpace: activeSpaceContext,
     async openWidget(widgetId) {
       const app = SPACE_APP_DEFINITIONS.find((item) => item.id === widgetId);
       if (!app?.entry) throw new Error("widget_not_registered");
-      await openExternalAppFromIcon(app, widgetLayout(app.id).minimized, (minimized) => setWidgetMinimized(app.id, minimized));
+      return ensureExternalAppOpen(app, widgetLayout(app.id).minimized, (minimized) => setWidgetMinimized(app.id, minimized));
     },
+    openSpace: (reference) => openSpaceByReference(reference, { spaces: state.userSpaces, activeSpaceId: state.activePanel, activate: setPanel }),
     async applyWindowsUpdate(payload = {}) {
       const bridge = windowsNativeDiagnosticsBridge();
       if (!bridge?.run) throw new Error("windows_update_bridge_unavailable");

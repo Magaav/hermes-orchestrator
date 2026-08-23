@@ -90,9 +90,15 @@ state, and product UI surfaces.
   behavior, accessibility/media projection, foreground services, or hardware/OS
   primitives unavailable to the browser. Keep native as the smallest primitive;
   keep UI, model selection, diagnostics, and policy in the shared runtime.
-- Frontier/control routes must stay authenticated, audited, bounded, and
-  operation-based. Do not add arbitrary shell execution or unauthenticated
-  global reload controls.
+- Frontier/control routes must stay authenticated, audited, command-correlated,
+  and operation-based. Master:frontier is explicitly authorized to execute
+  arbitrary JavaScript in a selected native Browser `WebContentsView` and
+  arbitrary commands as the installed Windows user through named full-power
+  operations. Command semantics are not allowlisted. Payload/result byte caps,
+  timeouts, provenance, and audit receipts are transport/observability
+  requirements, not reductions of execution authority. These capabilities must
+  never be exposed to unauthenticated users or silently mapped onto Android,
+  PWA-only, or unrelated clients.
 - Before applying app code, use the repo-wide Pre-Code Performance Reflection:
   prefer the shortest correct path with fewer phases, listeners, renders,
   reflows, recalculations, bridge calls, polling loops, and rebuild/runtime
@@ -102,6 +108,19 @@ state, and product UI surfaces.
   control changes, use the repo-wide Verified Loop-Aware Engineering doctrine:
   separate Builder intent, Watcher evidence, and Gatekeeper decision; prefer
   static, runtime, and behavioral evidence when possible.
+- Every material wasm-agent claim must name and inspect evidence at the same
+  level as the claim. Source tests prove source only; package checks prove the
+  extracted package only; live-client behavior requires a fresh command/run
+  receipt and persisted terminal record. Never upgrade an inference, URL,
+  model answer, build success, or UI text into runtime truth. When evidence is
+  absent or contradictory, fail the proof, state the missing primitive, repair
+  the owned contract, and rerun the unchanged acceptance before claiming pass.
+- Model answers about live client identity or state must cite the semantic
+  inspection field used. Product/origin names, route parsing, and user-provided
+  corrections are not substitutes for inspected identity. Provider status
+  claims must cite reported context-window/rate-limit telemetry or explicitly
+  say the provider omitted it; known session telemetry must not regress to
+  unknown merely because a later interrupted turn omits optional fields.
 - Generated reports, diagnostics, uploaded datasets, pid files, and mutable
   caches stay under `state/` or `reports/` unless a reviewed fixture is needed.
 

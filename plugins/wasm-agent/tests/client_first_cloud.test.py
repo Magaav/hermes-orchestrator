@@ -335,6 +335,10 @@ class ClientFirstCloudTest(unittest.TestCase):
         self.assertNotIn(legacy_refresh_wake_word_command, static_server.NATIVE_CONTROL_COMMAND_TYPES)
         self.assertIn("apply_wake_word_policy", static_server.NATIVE_CONTROL_COMMAND_TYPES)
         self.assertIn("play_audio_stimulus", static_server.NATIVE_CONTROL_COMMAND_TYPES)
+        for command in ("open_widget", "browser_navigate", "browser_input_receipt", "browser_pointer_dispatch"):
+            self.assertIn(command, static_server.NATIVE_CONTROL_COMMAND_TYPES)
+            self.assertIn(command, static_server.FRONTIER_OPERATOR_COMMAND_TYPES)
+            self.assertEqual(static_server.FRONTIER_OPERATOR_NATIVE_COMMAND[command], command)
         self.assertEqual(static_server.normalize_native_control_command_type(legacy_open_wake_word_command), "open_wake_word")
         self.assertEqual(static_server.normalize_native_control_command_type(legacy_refresh_wake_word_command), "refresh_wake_word_state")
 

@@ -39,31 +39,85 @@ const latestContextTokens = (diagnostics = {}) => {
 
 const percentageLeft = (used, total) => total > 0 ? Math.max(0, Math.min(100, Math.round((1 - used / total) * 100))) : null;
 
-export function masterFrontierStatusModel({ sessionId = "", diagnostics = {} } = {}) {
+export function masterFrontierStatusModel({ sessionId = "", diagnostics = {}, sessionSummary = {} } = {}) {
+  const calls = Array.isArray(diagnostics.token_usage) ? diagnostics.token_usage : [];
+  const latestCall = calls.at(-1) || {};
+  const telemetry = diagnostics.status_telemetry
+    || diagnostics.token_usage_total?.status_telemetry
+    || latestCall.status_telemetry
+    || {};
+  const modelName = String(
+    telemetry.model?.value
+      || diagnostics.direct_head?.model
+      || diagnostics.model
+      || diagnostics.token_usage_total?.model
+      || latestCall.model
+      || diagnostics.runtime?.model
+      || "",
+  ).trim();
   const contextUsed = latestContextTokens(diagnostics);
   const contextWindow = firstNumber(diagnostics, ["context_window_tokens", "model_context_window", "context_window"])
+    ?? firstNumber(telemetry.context_window || {}, ["tokens"])
     ?? firstNumber(diagnostics.token_usage_total || {}, ["context_window_tokens", "model_context_window", "context_window"])
     ?? firstNumber(diagnostics.runtime || {}, ["context_window_tokens", "model_context_window", "context_window"]);
   const limits = diagnostics.rate_limits || diagnostics.rateLimits || diagnostics.token_usage_total?.rate_limits || {};
   const weekly = limits.seven_day || limits.sevenDay || limits.weekly || {};
   const weeklyLeft = firstNumber(weekly, ["percent_left", "percentLeft", "remaining_percent"]);
   const weeklyUsed = firstNumber(weekly, ["percent_used", "percentUsed"]);
+  const weeklyStatus = String(telemetry.seven_day?.status || (weeklyLeft !== null || weeklyUsed !== null ? "reported" : "unknown"));
+  const sessionUsage = sessionSummary?.usage && typeof sessionSummary.usage === "object" ? sessionSummary.usage : {};
+  const sessionInput = firstNumber(sessionUsage, ["input_tokens", "prompt_tokens"]);
+  const sessionCached = firstNumber(sessionUsage, ["cached_input_tokens", "cache_read_tokens"]) ?? 0;
   return {
     sessionId: String(sessionId || diagnostics.session_id || "-") ,
+    modelName: modelName || "not reported",
     contextUsed,
     contextWindow,
     contextLeft: contextUsed !== null && contextWindow !== null ? percentageLeft(contextUsed, contextWindow) : null,
+    sessionTokens: firstNumber(sessionUsage, ["total_tokens"]),
+    sessionInput,
+    sessionCached,
+    sessionFresh: sessionInput === null ? null : Math.max(0, sessionInput - sessionCached),
+    sessionTurns: number(sessionSummary?.turns),
     weeklyLeft: weeklyLeft ?? (weeklyUsed !== null ? Math.max(0, 100 - weeklyUsed) : null),
+    weeklyStatus,
     weeklyReset: String(weekly.resets_at_label || weekly.resetsAtLabel || weekly.resets_at || weekly.resetsAt || ""),
   };
 }
 
 export function mergeMasterFrontierStatusUsage(usage = {}, previous = {}) {
   const merged = { ...(usage || {}) };
-  for (const key of ["active_context_tokens", "context_window_tokens", "rate_limits"]) {
+  for (const key of ["model", "active_context_tokens", "context_window_tokens", "rate_limits", "status_telemetry"]) {
     if (previous?.[key] !== undefined) merged[key] = previous[key];
   }
   return merged;
+}
+
+export function mergeMasterFrontierSessionStatusDiagnostics(diagnostics = {}, messages = []) {
+  const current = diagnostics && typeof diagnostics === "object" ? diagnostics : {};
+  const prior = [...(Array.isArray(messages) ? messages : [])].reverse().find((message) => {
+    const candidate = message?.diagnostics;
+    if (!candidate || candidate === current) return false;
+    return Boolean(
+      candidate.context_window_tokens
+      || candidate.status_telemetry?.context_window
+      || candidate.token_usage_total?.context_window_tokens
+      || candidate.rate_limits?.seven_day
+      || candidate.token_usage_total?.rate_limits?.seven_day
+    );
+  })?.diagnostics || {};
+  const priorTotal = prior.token_usage_total && typeof prior.token_usage_total === "object" ? prior.token_usage_total : {};
+  const currentTotal = current.token_usage_total && typeof current.token_usage_total === "object" ? current.token_usage_total : {};
+  const carry = {};
+  for (const key of ["context_window_tokens", "rate_limits", "status_telemetry"]) {
+    const value = current[key] ?? currentTotal[key] ?? prior[key] ?? priorTotal[key];
+    if (value !== undefined) carry[key] = value;
+  }
+  return {
+    ...current,
+    ...carry,
+    token_usage_total: { ...priorTotal, ...currentTotal, ...carry },
+  };
 }
 
 export async function refreshMasterFrontierStatus({ messages = [], refreshLedger } = {}) {
@@ -105,10 +159,15 @@ export function renderMasterFrontierStatusPanel(root, input = {}) {
     return line;
   };
   body.append(row("Session:", model.sessionId));
+  body.append(row("Model:", model.modelName));
   const contextText = model.contextWindow === null || model.contextUsed === null
-    ? `${compact(model.contextUsed)} used / window unavailable`
+    ? `${compact(model.contextUsed)} used / window not reported`
     : `${model.contextLeft}% left (${model.contextUsed.toLocaleString()} used / ${compact(model.contextWindow)})`;
-  body.append(row("Context:", contextText));
+  body.append(row("Thread context:", contextText));
+  const sessionText = model.sessionTokens === null
+    ? "not reported"
+    : `${model.sessionTokens.toLocaleString()} total · ${compact(model.sessionFresh)} fresh · ${compact(model.sessionCached)} cached${model.sessionTurns === null ? "" : ` · ${model.sessionTurns} turns`}`;
+  body.append(row("Session tokens:", sessionText));
 
   const allowance = element(document, "div", "codex-status__allowance");
   const meter = element(document, "span", "codex-status__meter");
@@ -121,7 +180,7 @@ export function renderMasterFrontierStatusPanel(root, input = {}) {
     resetLabel = new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric" }).format(new Date(Number(resetLabel) * 1000));
   }
   const weeklyText = model.weeklyLeft === null
-    ? "unavailable"
+    ? (model.weeklyStatus === "provider_omitted" ? "provider omitted" : `telemetry ${model.weeklyStatus}`)
     : `${model.weeklyLeft}% left${resetLabel ? ` (resets ${resetLabel})` : ""}`;
   allowance.append(element(document, "span", "codex-status__weekly-text", weeklyText));
   body.append(row("7d limit:", "", allowance));

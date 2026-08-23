@@ -19,8 +19,15 @@ V5_TOOLS = {
     "repository.diff": ("diff", lambda args: args),
     "repository.prove": ("prove", lambda args: args),
     "client.inspect": ("client", lambda args: {**args, "operation": "inspect"}),
+    "client.browser.inspect": ("client", lambda args: {"operation": "browser_inspect", "client_id": args.get("client"), "wait_sec": args.get("wait_sec", 18)}),
     "client.widget.open": ("client", lambda args: {"operation": "open_widget", "client_id": args.get("client"), "widget_id": args.get("widget"), "wait_sec": args.get("wait_sec", 18)}),
+    "client.space.open": ("client", lambda args: {"operation": "space_open", "client_id": args.get("client"), "space": args.get("space"), "wait_sec": args.get("wait_sec", 18)}),
     "client.browser.navigate": ("client", lambda args: {"operation": "browser_navigate", "client_id": args.get("client"), "url": args.get("url"), "wait_sec": args.get("wait_sec", 18)}),
+    "client.browser.input_receipt": ("client", lambda args: {"operation": "browser_input_receipt", "client_id": args.get("client"), "enabled": args.get("enabled"), "wait_sec": args.get("wait_sec", 18)}),
+    "client.browser.pointer.dispatch": ("client", lambda args: {"operation": "browser_pointer_dispatch", "client_id": args.get("client"), "x": args.get("x"), "y": args.get("y"), "wait_sec": args.get("wait_sec", 18)}),
+    "client.browser.javascript.observe.unrestricted": ("client", lambda args: {"operation": "browser_javascript_execute_unrestricted", "client_id": args.get("client"), "javascript": args.get("javascript"), "wait_sec": args.get("wait_sec", 30)}),
+    "client.browser.javascript.execute.unrestricted": ("client", lambda args: {"operation": "browser_javascript_execute_unrestricted", "client_id": args.get("client"), "javascript": args.get("javascript"), "wait_sec": args.get("wait_sec", 30)}),
+    "client.windows.shell.execute.unrestricted": ("client", lambda args: {"operation": "windows_shell_execute_unrestricted", "client_id": args.get("client"), "command": args.get("command"), "shell": args.get("shell", "powershell"), "cwd": args.get("cwd", ""), "environment": args.get("environment", {}), "timeout_ms": args.get("timeout_ms", 60000), "wait_sec": args.get("wait_sec", 20)}),
 }
 
 

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import tempfile
@@ -63,6 +64,57 @@ class V6PersistenceTests(unittest.TestCase):
                 self.connect, user_id="u1", session_id="s1", route=self.route(),
                 source_run_id="run-1", expected_sha256=ref["sha256"],
             )
+
+    def seed_terminal_run(self, *, run_id="run-terminal", user_id="u1", session_id="s1", route_id="fixture.ui", reply="Verified Browser result.", gate=True, proof=True) -> None:
+        final = {
+            "route_id": route_id, "reply": reply,
+            "local_tools": [{"capability": "client.browser.inspect", "status": "acknowledged", "ok": True}],
+            "evidence": [{"proof": ["native.web_surface.status"] if proof else []}],
+        }
+        with self.connect() as conn:
+            conn.execute("CREATE TABLE agent_run_tb (run_id TEXT, turn_id TEXT, user_id TEXT, session_id TEXT, protocol TEXT, status TEXT, created_at INTEGER, final_json TEXT)")
+            conn.execute("CREATE TABLE agent_run_event_tb (run_id TEXT, user_id TEXT, session_id TEXT, type TEXT, payload_json TEXT)")
+            conn.execute(
+                "INSERT INTO agent_run_tb VALUES (?,?,?,?,?,?,?,?)",
+                (run_id, "turn-terminal", user_id, session_id, "v6", "completed", 1000, json.dumps(final)),
+            )
+            if gate:
+                conn.execute(
+                    "INSERT INTO agent_run_event_tb VALUES (?,?,?,?,?)",
+                    (run_id, user_id, session_id, "gate.decision", json.dumps({"status": "terminal_result"})),
+                )
+
+    def test_latest_terminal_evidence_requires_exact_transcript_and_scope_binding(self) -> None:
+        self.seed_terminal_run()
+        found = persistence.latest_terminal_evidence(
+            self.connect, user_id="u1", session_id="s1", route_id="fixture.ui",
+            exclude_run_id="run-current", assistant_content="Verified Browser result.",
+        )
+        self.assertEqual(found["run_id"], "run-terminal")
+        self.assertEqual(found["capabilities"], ["client.browser.inspect"])
+        self.assertEqual(found["proof"], ["native.web_surface.status"])
+        for changes in (
+            {"user_id": "u2"}, {"session_id": "s2"}, {"route_id": "fixture.other"},
+            {"assistant_content": "Different assistant text."}, {"exclude_run_id": "run-terminal"},
+        ):
+            arguments = {
+                "user_id": "u1", "session_id": "s1", "route_id": "fixture.ui",
+                "exclude_run_id": "run-current", "assistant_content": "Verified Browser result.",
+                **changes,
+            }
+            self.assertIsNone(persistence.latest_terminal_evidence(self.connect, **arguments))
+
+    def test_latest_terminal_evidence_rejects_missing_gate_or_proof(self) -> None:
+        for gate, proof in ((False, True), (True, False)):
+            with self.subTest(gate=gate, proof=proof):
+                self.temp.cleanup()
+                self.temp = tempfile.TemporaryDirectory()
+                self.path = Path(self.temp.name) / "state.sqlite3"
+                self.seed_terminal_run(gate=gate, proof=proof)
+                self.assertIsNone(persistence.latest_terminal_evidence(
+                    self.connect, user_id="u1", session_id="s1", route_id="fixture.ui",
+                    exclude_run_id="run-current", assistant_content="Verified Browser result.",
+                ))
 
 
 if __name__ == "__main__":

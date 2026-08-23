@@ -21,8 +21,8 @@ FROZEN_FILES = {
     },
     "plugins/wasm-agent/server/static_server.py": {
         "owner": "plugins/wasm-agent/server",
-        "target": "server/master_frontier/* or server/routes/*",
-        "module_prefixes": ["plugins/wasm-agent/server/master_frontier/", "plugins/wasm-agent/server/routes/"],
+        "target": "server/native_control_*, server/master_frontier/*, or server/routes/*",
+        "module_prefixes": ["plugins/wasm-agent/server/native_control_", "plugins/wasm-agent/server/master_frontier/", "plugins/wasm-agent/server/routes/"],
     },
     "plugins/wasm-agent/public/styles.css": {
         "owner": "plugins/wasm-agent/public",

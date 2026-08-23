@@ -31,6 +31,23 @@ LIVE_OBSERVATION_RE = re.compile(
     r"(?:browser|page|screen|application|app|ui)\b",
     re.IGNORECASE,
 )
+CLIENT_ACTION_RE = re.compile(
+    r"\b(?:click|close|focus|hide|maximize|minimize|navigate|open|post|reload|select|send|show|type|write)\b",
+    re.IGNORECASE,
+)
+CLIENT_ACTION_DIRECTIVE_RE = re.compile(
+    r"^\s*(?:(?:can|could|would)\s+you\s+|please\s+)?(?:click|close|focus|hide|maximize|minimize|navigate|open|post|reload|select|send|show|type|write)\b",
+    re.IGNORECASE,
+)
+CLIENT_SURFACE_RE = re.compile(
+    r"\b(?:browser|client|panel|space|tab|widget|window)\w*\b",
+    re.IGNORECASE,
+)
+CLIENT_STATE_QUERY_RE = re.compile(
+    r"\b(?:is|are)\b.{0,80}\b(?:active|closed|focused|hidden|open|opened|running|shown|visible)\b|"
+    r"\b(?:active|open|opened|visible)\b.{0,40}\?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _compact_json(value: Any, *, limit: int = 3000) -> str:
@@ -111,6 +128,26 @@ def text_is_capability_inquiry(text: str) -> bool:
         r"\bchange\b",
     )
     return not any(re.search(pattern, clean) for pattern in explicit_commit_patterns)
+
+
+def objective_is_declared_client_action(envelope: dict[str, Any]) -> bool:
+    """Recognize an imperative only when the resolved route declares client actions."""
+    route_contract = envelope.get("route_contract") if isinstance(envelope.get("route_contract"), dict) else {}
+    client_ui = route_contract.get("client_ui") if isinstance(route_contract.get("client_ui"), dict) else {}
+    operations = client_ui.get("operations") if isinstance(client_ui.get("operations"), list) else []
+    objective = str(envelope.get("objective") or "")
+    return bool(
+        operations
+        and (CLIENT_ACTION_RE.search(objective) or CLIENT_STATE_QUERY_RE.search(objective))
+        and (CLIENT_SURFACE_RE.search(objective) or CLIENT_ACTION_DIRECTIVE_RE.search(objective))
+    )
+
+
+def objective_is_declared_client_state_query(envelope: dict[str, Any]) -> bool:
+    """Recognize a live-state question only on a route with declared client operations."""
+    route_contract = envelope.get("route_contract") if isinstance(envelope.get("route_contract"), dict) else {}
+    client_ui = route_contract.get("client_ui") if isinstance(route_contract.get("client_ui"), dict) else {}
+    return bool(client_ui.get("operations") and CLIENT_SURFACE_RE.search(str(envelope.get("objective") or "")) and CLIENT_STATE_QUERY_RE.search(str(envelope.get("objective") or "")))
 
 
 def objective_is_implementation_intent(envelope: dict[str, Any]) -> bool:

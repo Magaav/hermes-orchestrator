@@ -41,7 +41,13 @@ Agent Native.
 - Keep backend probing, Google login, cookie persistence, service-worker cache
   clearing, and preload bridge changes aligned with the cloud PWA contract.
 - Keep diagnostics bridges bounded to named operations with fixed arguments and
-  audited outputs.
+  audited outputs. Explicit exception: authenticated Master:frontier full-power
+  operations may execute arbitrary Browser JavaScript and arbitrary commands as
+  the installed Windows user. Their operation names, target client/surface,
+  command correlation, exit status, duration, and bounded output receipts must
+  remain auditable. Do not perform privilege escalation implicitly; execution
+  inherits exactly the installed app process token unless a future contract
+  explicitly grants elevation.
 
 ## Verification
 

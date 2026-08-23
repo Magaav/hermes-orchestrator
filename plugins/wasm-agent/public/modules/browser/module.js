@@ -4,7 +4,7 @@ export const moduleDefinition = {
   status: "native Chromium",
   detail: "Electron WebContentsView portal with persistent isolated sessions and bounded navigation proof.",
   defaultEnabled: true,
-  firmware: "/modules/browser/browser.entry.js",
+  firmware: "/modules/browser/browser.entry.js?v=20260822-surface-readiness1",
   capabilities: ["browser.session.status", "browser.navigate", "browser.history", "browser.native.surface", "browser.prove"],
   state: {
     browserStorage: "wasmAgent.browserPortal.v2",

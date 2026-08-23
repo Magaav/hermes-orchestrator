@@ -41,6 +41,53 @@ class LiveClientsTest(unittest.TestCase):
         self.assertEqual(missing["capabilities"], [])
         self.assertEqual(blank["capabilities"], [])
 
+    def test_browser_control_registry_and_payloads_are_bounded(self) -> None:
+        self.assertEqual(
+            live_clients.BROWSER_CONTROL_COMMAND_TYPES,
+            {"open_widget", "space_open", "browser_navigate", "browser_input_receipt", "browser_pointer_dispatch", "browser_javascript_execute_unrestricted"},
+        )
+        self.assertEqual(
+            live_clients.normalize_control_payload("browser_input_receipt", {"enabled": False}),
+            {"enabled": False},
+        )
+        self.assertEqual(
+            live_clients.normalize_control_payload(
+                "browser_pointer_dispatch", {"x": 123, "y": 456}, command_id="cmd:pointer-7",
+            ),
+            {"x": 123, "y": 456, "command_id": "cmd-pointer-7"},
+        )
+        self.assertEqual(
+            live_clients.normalize_control_payload("browser_javascript_execute_unrestricted", {"javascript": "document.title"}),
+            {"javascript": "document.title"},
+        )
+        self.assertEqual(
+            live_clients.normalize_control_payload("windows_shell_execute_unrestricted", {"command": "whoami"}),
+            {"command": "whoami", "shell": "powershell", "cwd": "", "environment": {}, "timeout_ms": 60000},
+        )
+        for command, payload in (
+            ("browser_input_receipt", {"enabled": 1}),
+            ("browser_input_receipt", {"enabled": True, "extra": "denied"}),
+            ("browser_pointer_dispatch", {"x": True, "y": 4}),
+            ("browser_pointer_dispatch", {"x": 1.5, "y": 4}),
+            ("browser_pointer_dispatch", {"x": 65_536, "y": 4}),
+            ("browser_pointer_dispatch", {"x": 3, "y": 4, "command_id": "model-supplied"}),
+            ("browser_javascript_execute_unrestricted", {"javascript": ""}),
+            ("windows_shell_execute_unrestricted", {"command": "whoami", "shell": "bash"}),
+        ):
+            with self.subTest(command=command, payload=payload), self.assertRaises(ValueError):
+                live_clients.normalize_control_payload(command, payload)
+
+    def test_strict_operator_payload_keeps_audit_metadata_out_of_renderer_message(self) -> None:
+        metadata = {"frontier_command": "browser_input_receipt", "requested_by": "operator"}
+        self.assertEqual(
+            live_clients.operator_control_payload("browser_input_receipt", {"enabled": True}, metadata),
+            {"enabled": True},
+        )
+        self.assertEqual(
+            live_clients.operator_control_payload("open_widget", {"widget_id": "browser"}, metadata),
+            {"widget_id": "browser", **metadata},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

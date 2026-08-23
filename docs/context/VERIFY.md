@@ -100,6 +100,60 @@ static/behavioral contract layer only. Run
 `python3 tools/context/prove-master-frontier-production.py --include-runtime`
 before claiming live node-brain availability.
 
+### WASM Agent product-readiness evaluation
+
+Validate the versioned schema and promise-composition contract without running
+any child proof:
+
+```bash
+python3 tools/context/evaluate-wasm-agent-product-readiness.py --validate-only
+```
+
+The normal command is artifact-only. It freshness-checks and normalizes the
+existing registered evidence without provider calls, production control,
+builds, installs, or device actions:
+
+```bash
+python3 tools/context/evaluate-wasm-agent-product-readiness.py
+```
+
+Run a journey only with explicit intent; its registered promises execute
+serially before normalization:
+
+```bash
+python3 tools/context/evaluate-wasm-agent-product-readiness.py --run repository-agent
+python3 tools/context/evaluate-wasm-agent-product-readiness.py --run electron-browser-agent
+python3 tools/context/evaluate-wasm-agent-product-readiness.py --run android-voice-agent
+```
+
+`--run` is repeatable and `--run all` is an explicit stateful full campaign.
+Use `--compare <prior-result.json>` for before/after coverage and status. The
+schema and reports are:
+
+```text
+docs/context/PRODUCT_READINESS_RESULT_SCHEMA.json
+reports/context/latest/wasm-agent-product-readiness-result.json
+reports/context/latest/wasm-agent-product-readiness-summary.md
+reports/context/product-readiness/<timestamp>.json
+reports/context/product-readiness/<timestamp>.md
+```
+
+The JSON report is authoritative. `evaluationCompleted: true` proves that the
+evaluation ran; only `ready: true` is an aggregate readiness pass. Missing
+measurements must remain `null` and be named in `missingMetrics`.
+
+Current bounded snapshot, run `readiness-20260820T145655Z`:
+
+| Journey | Status | Current measured evidence | Boundary |
+| --- | --- | --- | --- |
+| `repository-agent` | pass | 37,713 ms; GPT-5.6 Sol; 7 provider calls; exact 26,013 total tokens; 0 incorrect, unauthorized, or human-intervention actions; 100% required-metric coverage | Local disposable Git repository, not universal repository or production proof. |
+| `electron-browser-agent` | pass | 51,107 ms; production selected GPT-5.6 Luna; 3 provider calls; exact 33,431 total tokens; client acknowledgement and command receipt verified; 0 incorrect, unauthorized, or human-intervention actions; 100% required-metric coverage | Bounded production Browser-widget action, not Windows installer/login-persistence proof. |
+| `android-voice-agent` | fail | 76,745 ms; 21.43% required-metric coverage; requested threshold `0.999`; 11 required voice metrics missing | `android_device_missing` (`missing-access`); production authority and hot-shell preflight passed on installed Windows build `win-x64-20260815T212625Z`, but no authorized Android device was visible to ADB through the Windows bridge. No current wake/transcript/routing/avatar/acknowledgement readiness pass exists. Older Android results remain historical or stale. |
+
+The aggregate result is `evaluationCompleted: true`, `ready: false`. Do not use
+cloud-local `adb devices` to diagnose the Android prerequisite; current physical
+device evidence must come through the installed Windows bridge.
+
 ### Master:frontier V6 proof ladder
 
 Run V6 checks from cheapest to most stateful:
@@ -223,11 +277,19 @@ hot-op bundle IDs/SHAs through `prove-hot-shell.py` or the doctor.
 
 ```bash
 cd native/windows/src
-npm run verify:win-installer -- /local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260613T003310Z.exe
+npm run verify:win-installer -- /local/native/windows/release/WASM-Agent-Setup-x64-0.1.0-20260815T212625Z.exe
 ```
 
 Writes `native/windows/release/VERIFY.json` when final NSIS extraction and
 installed `app.asar` checks pass. This is still not installed-app login proof.
+
+Current package evidence: `native/windows/release/VERIFY.json` is a passing
+final extracted-NSIS/app.asar proof for build
+`win-x64-20260815T212625Z`, installer SHA-256
+`70f90a1b96164130e91ace4a56f5be2cf1ea63228b955bcc7909152abbd6da36`,
+and app.asar SHA-256
+`3f2c067849fe834959d0e44769269e2122d41cf9ff370e998645525609be5b85`.
+It does not contain the required installed login/close/reopen/session evidence.
 
 Package verification is not feed publication. After `VERIFY.json` is written,
 the normal release path must prove the Windows feed before Go Native / Check
@@ -503,3 +565,33 @@ When provider access is configured, the separate dev-only source check is
 live-frontier verified only when
 `reports/master-frontier-v4/live-evaluation.json` has `ok: true`; this never
 constitutes production proof.
+
+## Current Windows Installed Proof (2026-08-20)
+
+Build `win-x64-20260820T175835Z` passed repeated final NSIS extraction with
+installer SHA `22cb56366c6c3b6446d65656f4a4ed0e574bbd42e7c97f18cce2007eaee7e78e`
+and app.asar SHA
+`b7479ee6640dbe02a95bc983416454246bdf79ecf34870283d852b4871aff111`.
+The installed app observed the same raw archive through `electron.original-fs`.
+After a full app restart, the exact production Home route, `wa_uid`, durable
+expiration metadata, and authenticated `/auth/session` HTTP 200 all passed.
+
+Browser input receipt runtime remains incomplete. Receipt enable passed, but
+the bounded synthetic dispatch returned
+`surface_not_ready_for_pointer_dispatch`; inspection showed a created surface
+with `loading:false`, status `loading`, and `visible:false`. No synthetic or
+physical gesture receipt, DOM target, or page action success is claimed. See
+`reports/context/latest/windows-native-browser-input-receipt-runtime.json`.
+
+Build `win-x64-20260820T195241Z` separately passed final NSIS extraction for
+the full-power executor and Browser manager, with installer SHA
+`08b46bf491a25f7652a6765e2e7f17add00998cb488bccf8519880ba75ddbed1`
+and packaged app.asar SHA
+`9bda2adfbd2fbbcfc71be760ff0553e49884f71594840da01026127e82483dec`.
+After supervised install it advertised the exact Browser-JavaScript and
+Windows-shell capabilities. Harmless command-correlated runtime canaries
+executed arbitrary JavaScript in the WhatsApp page main world and PowerShell as
+Windows user `Victor`; see
+`reports/context/latest/master-frontier-full-power-client-runtime.json`.
+This does not claim Administrator/SYSTEM elevation. The installed raw-app.asar
+and durable-session proof must still be refreshed for build `195241`.

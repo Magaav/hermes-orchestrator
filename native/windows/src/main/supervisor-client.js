@@ -60,8 +60,8 @@ async function activateOrLaunchInstaller(staged, latest = {}, validation = {}) {
     return result.ok ? { ok: true, supervised: true } : { ok: false, error: result.error || "supervisor_install_failed", supervisor: result };
   }
   try {
-    spawn(staged.path, [], { detached: true, stdio: "ignore", windowsHide: false }).unref();
-    return { ok: true, supervised: false };
+    spawn(staged.path, ["/S", "/currentuser"], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+    return { ok: true, supervised: false, silent: true, installMode: "currentuser" };
   } catch (error) {
     return { ok: false, error: "installer_failed", message: String(error?.message || error) };
   }

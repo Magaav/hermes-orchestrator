@@ -23,6 +23,7 @@ assert.strictEqual(manifest.channel, "dev");
 assert(manifest.artifacts.android.arm64, "arm64 Android APK must be present in feed");
 assert(manifest.artifacts.android.universal, "universal Android APK must be present in feed");
 assert(manifest.artifacts.runtime.launcher, "downloaded launcher runtime bundle must be present in feed");
+assert(manifest.artifacts.hotOps.audio.windowsAudioLoopbackProbe, "Windows audio loopback probe hot-op bundle must be present in feed");
 assert(manifest.artifacts.hotOps.android.hermesWakeProof, "Hermes wake hot-op bundle must be present in feed");
 assert(manifest.artifacts.hotOps.android.uiInputProof, "Android UI input hot-op bundle must be present in feed");
 assert(manifest.artifacts.hotOps.diagnostics.nativeDiagnosticsClassifier, "diagnostics classifier hot-op bundle must be present in feed");
@@ -58,6 +59,20 @@ for (const artifact of [manifest.artifacts.android.arm64, manifest.artifacts.and
 }
 
 const hermesHotOp = manifest.artifacts.hotOps.android.hermesWakeProof;
+const audioLoopbackHotOp = manifest.artifacts.hotOps.audio.windowsAudioLoopbackProbe;
+assert.strictEqual(audioLoopbackHotOp.kind, "windows-hot-op-bundle");
+assert.strictEqual(audioLoopbackHotOp.operationName, "inspect_windows_audio_loopback");
+assert.match(audioLoopbackHotOp.bundleSha, /^[a-f0-9]{64}$/i, "Windows audio loopback hot-op bundle must expose a bundle SHA");
+assert(Array.isArray(audioLoopbackHotOp.files) && audioLoopbackHotOp.files.length === 2, "Windows audio loopback hot-op bundle must include module and manifest files");
+for (const artifact of audioLoopbackHotOp.files) {
+  const filePath = path.resolve(artifact.path);
+  assert(fs.existsSync(filePath), `Windows audio loopback hot-op file path must exist: ${filePath}`);
+  const hash = crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+  assert.strictEqual(artifact.sha256, hash, "Windows audio loopback hot-op sha256 must match file hash");
+  assert(artifact.url.startsWith("/native/releases/hot-ops/audio/"), "Windows audio loopback URLs must stay under the audio hot-op release path");
+  assert(!path.isAbsolute(artifact.targetPath), "Windows audio loopback targetPath must be relative");
+}
+
 assert.strictEqual(hermesHotOp.kind, "windows-hot-op-bundle");
 assert.strictEqual(hermesHotOp.operationName, "run_android_hermes_wake_proof");
 assert(hermesHotOp.bundleId, "hot-op bundle must expose a bundleId");

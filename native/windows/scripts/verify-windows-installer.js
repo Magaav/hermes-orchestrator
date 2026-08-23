@@ -141,7 +141,19 @@ const mainJsPath = path.join(asarRoot, "main.js");
 const preloadJsPath = path.join(asarRoot, "preload.js");
 const supervisorClientPath = path.join(asarRoot, "main", "supervisor-client.js");
 const observabilityKernelPath = path.join(asarRoot, "main", "observability-kernel.js");
+const audioStimulusPath = path.join(asarRoot, "main", "audio-stimulus.js");
 const automaticUpdatesPath = path.join(asarRoot, "main", "automatic-updates.js");
+const appLifecyclePath = path.join(asarRoot, "main", "app-lifecycle.js");
+const packageIntegrityPath = path.join(asarRoot, "main", "package-integrity.js");
+const nativeSessionProofPath = path.join(asarRoot, "main", "native-session-proof.js");
+const fullPowerExecutorPath = path.join(asarRoot, "main", "full-power-executor.js");
+const sourcePackageIntegrityPath = path.join(srcRoot, "main", "package-integrity.js");
+const sourceNativeSessionProofPath = path.join(srcRoot, "main", "native-session-proof.js");
+const sourceFullPowerExecutorPath = path.join(srcRoot, "main", "full-power-executor.js");
+const webSurfaceManagerPath = path.join(asarRoot, "main", "web-surfaces", "manager.js");
+const webSurfaceManifestPath = path.join(asarRoot, "main", "web-surfaces", "capability-manifest.json");
+const sourceWebSurfaceManagerPath = path.join(srcRoot, "main", "web-surfaces", "manager.js");
+const sourceWebSurfaceManifestPath = path.join(srcRoot, "main", "web-surfaces", "capability-manifest.json");
 const nativeDefaults = fs.existsSync(nativeDefaultsPath)
   ? JSON.parse(fs.readFileSync(nativeDefaultsPath, "utf8"))
   : {};
@@ -209,6 +221,8 @@ if (nativeDefaults.mode !== "production") fail(`app.asar native-defaults.json mo
 if (nativeDefaults.allowLocalDev !== false) fail(`app.asar native-defaults.json allowLocalDev is not false: ${nativeDefaults.allowLocalDev}`);
 if (resourceDefaults.mode !== "production") fail(`resources/native-defaults.json mode is not production: ${resourceDefaults.mode || ""}`);
 if (resourceDefaults.allowLocalDev !== false) fail(`resources/native-defaults.json allowLocalDev is not false: ${resourceDefaults.allowLocalDev}`);
+if (!String(nativeDefaults.googleClientId || "").trim()) fail("app.asar native-defaults.json is missing the production Google login client ID");
+if (resourceDefaults.googleClientId !== nativeDefaults.googleClientId) fail("resources/native-defaults.json Google login client ID does not match app.asar");
 if (sourceDefaults.buildId && nativeDefaults.buildId !== sourceDefaults.buildId) {
   fail(`app.asar native-defaults.json buildId (${nativeDefaults.buildId || ""}) does not match freshly generated source buildId (${sourceDefaults.buildId})`);
 }
@@ -236,7 +250,14 @@ if (!preloadJs.includes("__wasmAgentDevHmr")) fail("Extracted installer preload 
 if (!resourceIconPath || fs.statSync(resourceIconPath).size < 1024) fail("Extracted installer resources/icon.ico is missing or unexpectedly small");
 if (!resourceSupervisorPath || fs.statSync(resourceSupervisorPath).size < 100000) fail("Extracted installer resources/wasm-agent-launcher.exe is missing or unexpectedly small");
 if (!fs.existsSync(supervisorClientPath) || !fs.readFileSync(supervisorClientPath, "utf8").includes("update.activate")) fail("Extracted app.asar is missing the Windows supervisor client contract");
+const supervisorClientJs = fs.readFileSync(supervisorClientPath, "utf8");
+if (!supervisorClientJs.includes('["/S", "/currentuser"]')) fail("Extracted app.asar is missing silent per-user fallback update activation");
 if (!fs.existsSync(observabilityKernelPath)) fail("Extracted app.asar is missing the observability kernel");
+if (!fs.existsSync(audioStimulusPath)) fail("Extracted app.asar is missing the Windows audio stimulus module");
+const audioStimulusJs = fs.readFileSync(audioStimulusPath, "utf8");
+if (!audioStimulusJs.includes("voice_inventory") || !audioStimulusJs.includes("SelectVoice")) {
+  fail("Extracted app.asar audio stimulus module is missing voice inventory or selection");
+}
 const observabilityKernelJs = fs.readFileSync(observabilityKernelPath, "utf8");
 if (!["observability_enable", "observability_collect", "observability_status", "observability_disable"].every((operation) => mainJs.includes(operation) && observabilityKernelJs.includes(operation))) {
   fail("Extracted app.asar is missing the bounded observability command contract");
@@ -246,6 +267,73 @@ if (!mainJs.includes("native.capabilities.observabilityLease.v1") || !observabil
 }
 if (!fs.existsSync(automaticUpdatesPath) || !mainJs.includes("startAutomaticUpdateLoop")) {
   fail("Extracted app.asar is missing the automatic update policy");
+}
+if (!fs.existsSync(appLifecyclePath)) fail("Extracted app.asar is missing the main-process lifecycle guard");
+if (!fs.existsSync(packageIntegrityPath) || !fs.readFileSync(packageIntegrityPath, "utf8").includes('require("original-fs")')) {
+  fail("Extracted app.asar is missing raw installed app.asar integrity support");
+}
+if (!fs.existsSync(nativeSessionProofPath) || !fs.readFileSync(nativeSessionProofPath, "utf8").includes("safeCookieSessionSummary")) {
+  fail("Extracted app.asar is missing the redacted native cookie-session proof projection");
+}
+if (sha256(packageIntegrityPath) !== sha256(sourcePackageIntegrityPath) || sha256(nativeSessionProofPath) !== sha256(sourceNativeSessionProofPath)) {
+  fail("Extracted app.asar installed-proof modules do not match the release inputs");
+}
+if (
+  !fs.existsSync(fullPowerExecutorPath)
+  || sha256(fullPowerExecutorPath) !== sha256(sourceFullPowerExecutorPath)
+  || !mainJs.includes("windows_shell_execute_unrestricted")
+  || !mainJs.includes("windows.shell.execute.unrestricted")
+  || !fs.readFileSync(fullPowerExecutorPath, "utf8").includes("hermes.wasm_agent.windows_full_power_execution.v1")
+) {
+  fail("Extracted app.asar is missing the unrestricted Windows-user execution contract");
+}
+const packagedIntegrity = require(packageIntegrityPath).createPackageIntegrity({
+  fs,
+  rawFs: fs,
+  rawHashSource: "verifier.node-fs",
+  resourcesPath: path.dirname(appAsarPath),
+});
+const packagedAsarProof = packagedIntegrity.appAsarProof();
+if (
+  packagedAsarProof.schema !== "hermes.wasm_agent.windows_app_asar_observation.v1"
+  || packagedAsarProof.ok !== true
+  || packagedAsarProof.packaged !== true
+  || packagedAsarProof.app_asar_sha256 !== sha256(appAsarPath)
+  || packagedAsarProof.app_asar_size_bytes !== fs.statSync(appAsarPath).size
+) {
+  fail("Extracted app.asar installed package proof module disagrees with independent verifier evidence");
+}
+if (!fs.existsSync(webSurfaceManagerPath) || !fs.existsSync(webSurfaceManifestPath)) {
+  fail("Extracted app.asar is missing the native web-surface input receipt contract");
+}
+if (
+  sha256(webSurfaceManagerPath) !== sha256(sourceWebSurfaceManagerPath)
+  || sha256(webSurfaceManifestPath) !== sha256(sourceWebSurfaceManifestPath)
+) {
+  fail("Extracted app.asar native web-surface sources do not match the release inputs");
+}
+const webSurfaceManagerJs = fs.readFileSync(webSurfaceManagerPath, "utf8");
+const webSurfaceManifest = JSON.parse(fs.readFileSync(webSurfaceManifestPath, "utf8"));
+if (
+  !webSurfaceManifest.capabilities?.includes("web_surface.input_receipt")
+  || !webSurfaceManifest.capabilities?.includes("web_surface.pointer.dispatch")
+  || !webSurfaceManifest.capabilities?.includes("web_surface.javascript.execute.unrestricted")
+  || webSurfaceManifest.limits?.inputReceiptMaxPerSurface !== 1
+  || webSurfaceManifest.limits?.inputReceiptTtlMs !== 120000
+  || webSurfaceManifest.limits?.pointerDispatchCorrelationMs !== 2000
+  || !webSurfaceManagerJs.includes("before-mouse-event")
+  || !webSurfaceManagerJs.includes("sendInputEvent")
+  || !webSurfaceManagerJs.includes("hermes.wasm_agent.native_web_surface_input_receipt.v1")
+  || !webSurfaceManagerJs.includes("hermes.wasm_agent.native_web_surface_pointer_dispatch.v1")
+  || !webSurfaceManagerJs.includes('case "input-receipt"')
+  || !webSurfaceManagerJs.includes('case "pointer-dispatch"')
+  || !webSurfaceManagerJs.includes('case "javascript-execute-unrestricted"')
+  || !webSurfaceManagerJs.includes("hermes.wasm_agent.native_web_surface_javascript_execution.v1")
+  || !webSurfaceManagerJs.includes('action: "pointer.primary_gesture"')
+  || !webSurfaceManagerJs.includes('outcome: "observed_pre_dispatch"')
+  || !webSurfaceManagerJs.includes('input_source: "electron_synthetic"')
+) {
+  fail("Extracted app.asar native web-surface input receipt contract is incomplete or unbounded");
 }
 if (!mainJs.includes("activateOrLaunchInstaller")) fail("Extracted app.asar main.js does not delegate installer activation to the supervisor client");
 if (!resourceHorcRunnerPath || !resourceHorcRunnerJs.includes("horc-local only supports") || !resourceHorcRunnerJs.includes("app-simulator")) {
@@ -298,6 +386,7 @@ const verifyReport = {
     { name: "compressed installer size recorded", ok: true, evidence: `${installerSizeBytes} bytes` },
     { name: "installed app.asar present", ok: true, evidence: appAsarPath },
     { name: "production URL target", ok: nativeDefaults.serverUrl === "https://wa.colmeio.com", evidence: nativeDefaults.serverUrl },
+    { name: "production Google login client configured", ok: true, evidence: "matching app.asar and resources native defaults" },
     { name: "localhost production strings absent", ok: true },
     { name: "cloud PWA and on-demand models excluded", ok: true, evidence: "resources/public absent" },
     { name: "frontier native commands present", ok: true, evidence: "main.js" },
@@ -309,7 +398,11 @@ const verifyReport = {
     { name: "Windows supervisor executable present", ok: true, evidence: resourceSupervisorPath ? `${path.relative(extractRoot, resourceSupervisorPath)} ${fs.statSync(resourceSupervisorPath).size} bytes` : "" },
     { name: "Electron update activation delegates to supervisor", ok: true, evidence: "main/supervisor-client.js" },
     { name: "on-demand observability lease packaged", ok: true, evidence: "main/observability-kernel.js; no public debug port" },
+    { name: "Windows selectable-voice audio module packaged", ok: true, evidence: "main/audio-stimulus.js" },
     { name: "automatic update policy packaged", ok: true, evidence: "login supervisor + startup/six-hour verified update loop" },
+    { name: "main-process lifecycle guard packaged", ok: true, evidence: "main/app-lifecycle.js" },
+    { name: "installed package and session proof modules packaged", ok: true, evidence: "raw app.asar SHA via original-fs; redacted durable-cookie summary" },
+    { name: "bounded native web-surface input receipt packaged", ok: true, evidence: "disabled by default; latest-only; 120000ms TTL; redacted primary gesture; explicit synthetic dispatch provenance" },
     { name: "native preload bridge present", ok: true, evidence: "nativeDiagnostics + __wasmAgentDevHmr" },
   ],
   caveat: "This verifies the final extracted NSIS artifact and app.asar contents. Real installed close/reopen auth lifecycle still requires verify-installed-app.ps1 on Windows.",

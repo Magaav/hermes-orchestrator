@@ -12,3 +12,12 @@ export function masterFrontierNodeId(value, { masterTargetId, frontierNodeId, fa
 export function masterFrontierSelectionTarget({ masterTargetId }) {
   return masterTargetId;
 }
+
+export function defaultAgentSelectionTarget({ masterTargetId, frontierNodeId, isAdmin }) {
+  return isAdmin ? masterTargetId : frontierNodeId;
+}
+
+export function normalizeAgentSelectionPreference(value, { masterTargetId, frontierNodeId, isAdmin }) {
+  const target = String(value || "").trim();
+  return isAdmin && target === frontierNodeId ? masterTargetId : target;
+}

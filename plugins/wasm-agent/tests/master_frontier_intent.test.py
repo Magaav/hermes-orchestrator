@@ -31,6 +31,19 @@ class MasterFrontierIntentTests(unittest.TestCase):
         self.assertFalse(intent.objective_is_implementation_intent(envelope))
         self.assertFalse(intent.goal_requires_change_artifact(envelope))
 
+    def test_greeting_prefixed_space_open_is_declared_client_action(self) -> None:
+        envelope = self.envelope("hello open realure space")
+        envelope["route_contract"] = {"client_ui": {"operations": ["space_open"]}}
+
+        self.assertTrue(intent.objective_is_declared_client_action(envelope))
+
+    def test_browser_widget_state_question_is_declared_client_observation(self) -> None:
+        envelope = self.envelope("hello is browser widget opened?")
+        envelope["route_contract"] = {"client_ui": {"operations": ["browser_inspect"]}}
+
+        self.assertTrue(intent.objective_is_declared_client_action(envelope))
+        self.assertTrue(intent.objective_is_declared_client_state_query(envelope))
+
     def test_explicit_widget_build_request_requires_change_artifact(self) -> None:
         envelope = self.envelope("Go ahead and build the widget in the Realure space")
 

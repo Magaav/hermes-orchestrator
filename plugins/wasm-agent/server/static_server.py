@@ -70,6 +70,7 @@ from master_frontier import planner as master_frontier_planner, repair as master
 import app_config as wasm_agent_app_config
 import live_clients as wasm_agent_live_clients
 import native_control_auth as wasm_agent_native_control_auth
+import native_control_receipts as wasm_agent_native_control_receipts
 import property_photo_edit
 import synthetic_canary
 
@@ -6310,6 +6311,9 @@ def provider_envelope_run_context(body: dict[str, Any]) -> dict[str, Any]:
         "protocol": body.get("protocol"),
         "investigation_mode": body.get("investigation_mode"),
         "transcript": body.get("transcript") if isinstance(body.get("transcript"), list) else [],
+        "space_id": body.get("space_id"),
+        "space_name": body.get("space_name"),
+        "active_space": body.get("active_space") if isinstance(body.get("active_space"), dict) else {},
     }
     return {
         "envelope": envelope,
@@ -9879,7 +9883,7 @@ def persist_agent_run_token_ledger(
     result: dict[str, Any],
     payload: dict[str, Any],
 ) -> dict[str, Any] | None:
-    components = payload.get("components") if isinstance(payload.get("components"), dict) else {}
+    components = master_frontier_token_ledger.provider_call_components(payload)
     if not components:
         return None
     with auth_connect() as conn:
@@ -13531,7 +13535,7 @@ NATIVE_CONTROL_COMMAND_TYPES = {
     "request_windows_client_update",
     "verify_android_oauth",
     "export_diagnostics",
-    *wasm_agent_live_clients.OBSERVABILITY_COMMAND_TYPES,
+    *wasm_agent_live_clients.CLIENT_COMMAND_TYPES,
     "reload",
     "hard_reload",
     "reload_ignore_cache",
@@ -13539,8 +13543,6 @@ NATIVE_CONTROL_COMMAND_TYPES = {
     "screenshot",
     "status",
     "navigate",
-    "open_widget",
-    "browser_navigate",
     "apply_windows_update",
     "verify_installed_app",
     "verify_session",
@@ -13576,7 +13578,7 @@ FRONTIER_OPERATOR_COMMAND_TYPES = {
     "restart_app",
     "verify_session",
     "verify_installed_app",
-    *wasm_agent_live_clients.OBSERVABILITY_COMMAND_TYPES,
+    *wasm_agent_live_clients.CLIENT_COMMAND_TYPES,
     "export_diagnostics",
 }
 
@@ -13612,7 +13614,7 @@ FRONTIER_OPERATOR_NATIVE_COMMAND = {
     "restart_app": "restart_app",
     "verify_session": "verify_session",
     "verify_installed_app": "verify_installed_app",
-    **wasm_agent_live_clients.OBSERVABILITY_OPERATOR_COMMANDS,
+    **wasm_agent_live_clients.CLIENT_OPERATOR_COMMANDS,
     "export_diagnostics": "export_diagnostics",
 }
 
@@ -13945,6 +13947,10 @@ def create_native_control_command(
         raise BrowserError("invalid_native_control_command", f"Unsupported native control command: {command_type}")
     command_id = safe_state_id(str(body.get("command_id") or f"cmd-{uuid.uuid4().hex[:16]}"), f"cmd-{uuid.uuid4().hex[:16]}")
     payload = redact_native_diagnostics(body.get("payload") if isinstance(body.get("payload"), dict) else {})
+    try:
+        payload = wasm_agent_live_clients.normalize_control_payload(command_type, payload, command_id=command_id)
+    except ValueError as exc:
+        raise BrowserError("invalid_native_control_payload", str(exc)) from exc
     reason = clipped_verbatim(str(body.get("reason") or payload.get("reason") or ""), 600)
     timeout_sec = native_control_command_timeout_sec(command_type, payload)
     record = {
@@ -14005,6 +14011,8 @@ def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHand
     app_version = clipped_verbatim(str((query.get("app_version") or [""])[0]), 40)
     title = clipped_verbatim(str((query.get("title") or [""])[0]), 160)
     visibility = clipped_verbatim(str((query.get("visibility") or [""])[0]), 20)
+    space_id = clipped_verbatim(str((query.get("space_id") or [""])[0]), 120)
+    space_name = clipped_verbatim(str((query.get("space_name") or [""])[0]), 160)
     capabilities = clipped_verbatim(str((query.get("capabilities") or [""])[0]), 3000).split(",")
     now = iso_timestamp()
     heartbeat = {
@@ -14018,6 +14026,8 @@ def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHand
         "app_version": app_version,
         "title": title,
         "visibility": visibility,
+        "space_id": space_id,
+        "space_name": space_name,
         "capabilities": capabilities,
         "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
         "received_at": now,
@@ -15144,36 +15154,6 @@ def nested_get(payload: Any, keys: list[str], fallback: Any = None) -> Any:
     return fallback if current is None else current
 
 
-def latest_native_control_result(server: WasmAgentServer, device_id: str = "") -> dict[str, Any]:
-    root = native_control_dir(server) / "results"
-    candidates: list[Path] = []
-    safe_device = native_device_id_from_value(device_id, "")
-    if safe_device and (root / safe_device).exists():
-        candidates = list((root / safe_device).glob("*.json"))
-    if not candidates and root.exists():
-        candidates = list(root.glob("*/*.json"))
-    if not candidates:
-        return {}
-    latest = max(candidates, key=lambda item: item.stat().st_mtime)
-    payload = read_json_file(latest, {})
-    return payload if isinstance(payload, dict) else {}
-
-
-def latest_native_control_command(server: WasmAgentServer, device_id: str = "") -> dict[str, Any]:
-    root = native_control_dir(server) / "commands"
-    candidates: list[Path] = []
-    safe_device = native_device_id_from_value(device_id, "")
-    if safe_device and (root / safe_device).exists():
-        candidates = list((root / safe_device).glob("*.json"))
-    if not candidates and root.exists():
-        candidates = list(root.glob("*/*.json"))
-    if not candidates:
-        return {}
-    latest = max(candidates, key=lambda item: item.stat().st_mtime)
-    payload = read_json_file(latest, {})
-    return payload if isinstance(payload, dict) else {}
-
-
 def native_frontier_failure_classification(diagnostics: dict[str, Any]) -> str:
     payload = diagnostics.get("payload") if isinstance(diagnostics.get("payload"), dict) else diagnostics
     runtime = payload.get("runtime_diagnostics") if isinstance(payload, dict) and isinstance(payload.get("runtime_diagnostics"), dict) else payload
@@ -15231,8 +15211,8 @@ def native_frontier_status_payload(server: WasmAgentServer, device_id: str = "")
     frontend_ok = not bool(fatal)
     native_ok = app_running and route.startswith("https://wa.colmeio.com/")
     backend_ok = True
-    last_command = latest_native_control_command(server, selected_device)
-    last_result = latest_native_control_result(server, selected_device)
+    last_command = wasm_agent_native_control_receipts.latest_command(server.state_dir, selected_device)
+    last_result = wasm_agent_native_control_receipts.latest_result(server.state_dir, selected_device)
     last_reload = {}
     if isinstance(last_command, dict) and last_command.get("type") in {"reload", "hard_reload", "reload_ignore_cache", "clear_cache", "restart_app"}:
         last_reload = {
@@ -15284,7 +15264,7 @@ def native_frontier_status(server: WasmAgentServer, handler: WasmAgentHandler, u
         raise BrowserError("native_frontier_forbidden", "Frontier status requires admin, localhost, or native control-key access.", status=HTTPStatus.FORBIDDEN)
     query = parse_qs(urlparse(handler.path).query)
     device_id = str((query.get("device_id") or [""])[0] or "")
-    return native_frontier_status_payload(server, device_id)
+    return wasm_agent_native_control_receipts.attach_requested_receipt(native_frontier_status_payload(server, device_id), server.state_dir, query)
 
 
 def native_frontier_bundle_summary(device_id: str, status: dict[str, Any], diagnostics: dict[str, Any]) -> str:
@@ -15326,8 +15306,8 @@ def make_native_diagnostics_bundle_export(server: WasmAgentServer, device_id: st
         "status": status,
         "diagnostics": diagnostics,
         "native_control": {
-            "latest_command": latest_native_control_command(server, "" if safe_device == "latest" else safe_device),
-            "latest_result": latest_native_control_result(server, "" if safe_device == "latest" else safe_device),
+            "latest_command": wasm_agent_native_control_receipts.latest_command(server.state_dir, "" if safe_device == "latest" else safe_device),
+            "latest_result": wasm_agent_native_control_receipts.latest_result(server.state_dir, "" if safe_device == "latest" else safe_device),
             "clients": native_control_clients_payload(server),
             "latest_audit": read_json_file(native_control_dir(server) / "latest-audit.json", {}),
         },
@@ -15422,12 +15402,11 @@ def create_frontier_native_command(
             "command_id": body.get("command_id") or body.get("commandId") or f"frontier-{uuid.uuid4().hex[:16]}",
             "type": native_type,
             "reason": reason,
-            "payload": {
-                **(payload if isinstance(payload, dict) else {}),
+            "payload": wasm_agent_live_clients.operator_control_payload(native_type, payload, {
                 "frontier_command": command,
                 "reason": reason,
                 "requested_by": native_control_operator_actor(handler, user),
-            },
+            }),
         }, handler, user)["command"])
     export = None
     if command in {"collect_logs", "export_diagnostics"}:
@@ -21829,10 +21808,7 @@ def normalize_token_usage(usage: Any, source: str = "") -> dict[str, Any] | None
     )
     if reasoning is not None:
         normalized["reasoning_output_tokens"] = reasoning
-    for key in ("usage_scope", "usage_accuracy", "billable"):
-        if key in usage:
-            normalized[key] = usage[key]
-    return normalized
+    return master_frontier_token_ledger.with_usage_metadata(normalized, usage)
 
 
 def exact_llm_token_usage(usage: Any, *, source: str, model: str = "") -> dict[str, Any] | None:

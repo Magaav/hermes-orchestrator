@@ -8,7 +8,8 @@ from pathlib import Path
 SERVER = Path(__file__).resolve().parents[1] / "server"
 sys.path.insert(0, str(SERVER))
 
-from master_frontier.v6 import adapters, controller, kernel, projection, v5_bridge  # noqa: E402
+from master_frontier.v6 import adapters, contracts, controller, kernel, projection, v5_bridge  # noqa: E402
+from master_frontier import controller_v6 as hosted_controller  # noqa: E402
 
 
 def tool(name, arguments, reply=""):
@@ -16,6 +17,37 @@ def tool(name, arguments, reply=""):
 
 
 class V6ControllerTests(unittest.TestCase):
+    def test_debug_stall_fixture_is_explicit_and_bounded(self) -> None:
+        self.assertIsNone(hosted_controller._debug_stall_error({}))
+        self.assertIsNone(hosted_controller._debug_stall_error({"debug_fixture": "other"}))
+        error = hosted_controller._debug_stall_error({
+            "debug_fixture": "v6_no_semantic_progress",
+            "missing": ["caller-controlled-value"],
+        })
+        self.assertIsNotNone(error)
+        self.assertEqual(error.code, "v6_no_semantic_progress")
+        self.assertEqual(error.phase, "debug_fixture")
+        self.assertEqual(error.missing, ["completion:repo.read"])
+
+    def test_usage_total_preserves_thread_lifecycle_telemetry(self) -> None:
+        total = hosted_controller._usage_total([{
+            "total_tokens": 10, "model": "gpt-5.6-luna", "provider_thread_id": "thread-1",
+            "provider_thread_turn": 3, "provider_thread_resumed": True,
+            "provider_compaction_generation": 2, "provider_compaction_status": "completed",
+            "stable_context_mode": "thread_continuation", "stable_context_reused": True,
+        }], 1)
+        self.assertEqual(total["provider_thread_id"], "thread-1")
+        self.assertTrue(total["provider_thread_resumed"])
+        self.assertEqual(total["provider_compaction_generation"], 2)
+
+    @staticmethod
+    def terminal_capability():
+        return contracts.capability({
+            "id": "client.browser.inspect", "kind": "observe", "authority": "client.ui.inspect",
+            "executor": "client.browser.inspect", "terminal_result": True,
+            "proof": ["native.web_surface.status"],
+        })
+
     def test_bounded_session_history_precedes_current_projection(self) -> None:
         agent = kernel.Kernel(authorities=set())
         captured = {}
@@ -53,16 +85,26 @@ class V6ControllerTests(unittest.TestCase):
         updates = []
         events = []
         agent = kernel.Kernel(authorities={"client.ui.inspect", "client.ui.control"}, commentary_sink=updates.append)
-        client = {"runtime_type": "electron", "capabilities": ["control.widget.open"], "client_id": "electron-a", "widget_ids": ["browser"]}
+        client = {"runtime_type": "electron", "capabilities": ["observe.browser.inspect", "control.widget.open", "control.space.open"], "client_id": "electron-a", "widget_ids": ["browser"]}
         client_capabilities = adapters.live_client(client)
+        browser_capability = next(item for item in client_capabilities if item["id"] == "client.browser.inspect")
+        self.assertEqual(browser_capability["proof"], ["native.web_surface.status"])
+        self.assertIn("input receipt", browser_capability["summary"])
         widget_capability = next(item for item in client_capabilities if item["id"] == "client.widget.open")
         self.assertEqual(widget_capability["detail"], "client:electron-a;widgets:browser")
-        self.assertEqual(widget_capability["input"]["properties"]["client"]["enum"], ["electron-a"])
-        self.assertEqual(widget_capability["input"]["properties"]["client"]["default"], "electron-a")
+        self.assertNotIn("client", widget_capability["input"]["properties"])
+        self.assertNotIn("client", next(item for item in client_capabilities if item["id"] == "client.inspect")["input"]["properties"])
         self.assertEqual(widget_capability["input"]["properties"]["widget"]["enum"], ["browser"])
         self.assertEqual(widget_capability["input"]["properties"]["widget"]["default"], "browser")
+        space_capability = next(item for item in client_capabilities if item["id"] == "client.space.open")
+        self.assertEqual(space_capability["input"]["required"], ["space"])
+        self.assertEqual(space_capability["proof"], ["client.ack", "client.space.active"])
+        self.assertTrue(space_capability["terminal_result"])
         for capability in client_capabilities:
             agent.register(capability, lambda _cap, operation: {"ok": True, "state": "acknowledged", "observed": {"opened": True, "widget": operation["args"].get("widget")}, "proof": ["cmd:1"]})
+        browser_summary = next(item for item in agent.catalog.search("inspect browser") if item["id"] == "client.browser.inspect")["summary"]
+        self.assertNotIn("client=", browser_summary)
+        self.assertIn("wait_sec=number?", browser_summary)
 
         def complete(messages, tools, index):
             self.assertEqual([item["function"]["name"] for item in tools], ["discover", "detail", "execute", "checkpoint"])
@@ -72,8 +114,10 @@ class V6ControllerTests(unittest.TestCase):
                 return tool("discover", {"query": "open browser widget"})
             if index == 2:
                 self.assertEqual(decoded["capabilities"][0]["id"], "client.widget.open")
+                self.assertNotIn("client=", decoded["capabilities"][0]["summary"])
+                self.assertIn('widget="browser"!', decoded["capabilities"][0]["summary"])
                 return tool("execute", {"operations": [{
-                    "id": "op.open", "cap": "client.widget.open", "args": {"client": "electron-a", "widget": "browser"},
+                    "id": "op.open", "cap": "client.widget.open", "args": {"widget": "browser"},
                     "expect": {"opened": True}, "say": {"phase": "acting", "message": "I found the live Electron client. I’m opening its Browser widget now."},
                 }]})
             self.assertEqual(decoded["receipts"][0]["observed"].keys(), {"evidence"})
@@ -87,6 +131,90 @@ class V6ControllerTests(unittest.TestCase):
         self.assertEqual(len(result["trace"]), 3)
         self.assertEqual(result["trace"][0]["context"]["schema"], "master.frontier.v6.context.accounting.v1")
         self.assertGreater(result["trace"][1]["context"]["repeated_chars"], 0)
+
+    def test_terminal_observation_finishes_without_another_inference(self) -> None:
+        agent = kernel.Kernel(authorities={"client.ui.inspect"}, completion_requirements={"client.browser.inspect"})
+        agent.register(self.terminal_capability(), lambda _cap, _op: {
+            "ok": True, "state": "acknowledged",
+            "observed": {"answer": "The Browser widget is not currently visible. It has (16) WhatsApp loaded."},
+            "proof": ["native.web_surface.status", "cmd:1"],
+        })
+        calls = 0
+        events = []
+
+        def complete(_messages, _tools, index):
+            nonlocal calls
+            calls += 1
+            if index == 1:
+                return tool("discover", {"query": "inspect browser"})
+            return tool("execute", {"operations": [{"id": "inspect_browser", "cap": "client.browser.inspect", "args": {}}]})
+
+        result = controller.run("Can you see the Browser?", agent, complete, emit=events.append)
+        self.assertEqual(calls, 2)
+        self.assertEqual(len(result["trace"]), 2)
+        self.assertIn("WhatsApp", result["answer"])
+        self.assertIn("terminal_result", [item.get("status") for item in events])
+
+    def test_terminal_observation_is_fail_closed(self) -> None:
+        cases = {
+            "failed": {"ok": False, "state": "failed", "observed": {"answer": "unsafe"}, "proof": ["native.web_surface.status"]},
+            "missing_answer": {"ok": True, "state": "acknowledged", "observed": {}, "proof": ["native.web_surface.status"]},
+            "missing_proof": {"ok": True, "state": "acknowledged", "observed": {"answer": "unsafe"}, "proof": []},
+        }
+        for label, executor_result in cases.items():
+            with self.subTest(label=label):
+                agent = kernel.Kernel(authorities={"client.ui.inspect"})
+                agent.register(self.terminal_capability(), lambda _cap, _op, value=executor_result: value)
+                decisions = [
+                    tool("discover", {"query": "inspect browser"}),
+                    tool("execute", {"operations": [{"id": "inspect_browser", "cap": "client.browser.inspect", "args": {}}]}),
+                    {"reply": "The host continued safely."},
+                ]
+                result = controller.run("Inspect", agent, lambda *_args: decisions.pop(0))
+                self.assertEqual(result["answer"], "The host continued safely.")
+                self.assertEqual(len(result["trace"]), 3)
+
+    def test_terminal_observation_does_not_short_circuit_a_batch(self) -> None:
+        agent = kernel.Kernel(authorities={"client.ui.inspect"})
+        agent.register(self.terminal_capability(), lambda _cap, _op: {
+            "ok": True, "state": "acknowledged", "observed": {"answer": "Browser inspected."},
+            "proof": ["native.web_surface.status"],
+        })
+        ordinary = contracts.capability({
+            "id": "client.inspect", "kind": "observe", "authority": "client.ui.inspect", "executor": "client.inspect",
+        })
+        agent.register(ordinary, lambda _cap, _op: {"ok": True, "observed": {"live": True}})
+        decisions = [
+            tool("discover", {"query": "inspect"}),
+            tool("execute", {"operations": [
+                {"id": "inspect_browser", "cap": "client.browser.inspect", "args": {}},
+                {"id": "inspect_client", "cap": "client.inspect", "args": {}},
+            ]}),
+            {"reply": "Both inspections completed."},
+        ]
+        result = controller.run("Inspect both", agent, lambda *_args: decisions.pop(0))
+        self.assertEqual(result["answer"], "Both inspections completed.")
+        self.assertEqual(len(result["trace"]), 3)
+
+    def test_terminal_observation_does_not_bypass_completion_gaps(self) -> None:
+        agent = kernel.Kernel(
+            authorities={"client.ui.inspect"},
+            completion_requirements={"client.browser.inspect", "required.verify"},
+        )
+        agent.register(self.terminal_capability(), lambda _cap, _op: {
+            "ok": True, "state": "acknowledged", "observed": {"answer": "Browser inspected."},
+            "proof": ["native.web_surface.status"],
+        })
+        decisions = [
+            tool("discover", {"query": "inspect browser"}),
+            tool("execute", {"operations": [{"id": "inspect_browser", "cap": "client.browser.inspect", "args": {}}]}),
+            {"reply": "I cannot claim complete verification."},
+            {"reply": "I still cannot claim complete verification."},
+        ]
+        with self.assertRaisesRegex(controller.ControllerError, "missing=completion:required.verify") as raised:
+            controller.run("Inspect and verify", agent, lambda *_args: decisions.pop(0))
+        self.assertEqual(raised.exception.code, "v6_no_semantic_progress")
+        self.assertEqual(raised.exception.phase, "final_answer")
 
     def test_large_executor_result_stays_behind_evidence_handle(self) -> None:
         agent = kernel.Kernel(authorities={"repo.read"})
@@ -109,21 +237,87 @@ class V6ControllerTests(unittest.TestCase):
         detail = agent.evidence.detail(result["evidence"][0]["detail_ref"])
         self.assertEqual(len(detail["observed"]["content"]), 100_000)
 
+    def test_small_read_result_is_projected_once_without_detail_turn(self) -> None:
+        agent = kernel.Kernel(authorities={"client.ui.inspect"})
+        capability = contracts.capability({
+            "id": "client.inspect", "kind": "observe", "authority": "client.ui.inspect",
+            "executor": "client.inspect", "mode": "read", "proof": ["client.status"],
+        })
+        agent.register(capability, lambda _cap, _op: {
+            "ok": True,
+            "observed": {"chats": [{"name": "Laura", "selected": False}]},
+            "proof": ["client.status"],
+        })
+        captured = []
+
+        def complete(messages, _tools, index):
+            decoded = projection.decode(messages[-1]["content"])
+            captured.append(decoded)
+            if index == 1:
+                return tool("discover", {"query": "inspect chat"})
+            if index == 2:
+                return tool("execute", {"operations": [{"id": "inspect_chat", "cap": "client.inspect", "args": {}}]})
+            self.assertEqual(decoded["payloads"][0]["trust"], "untrusted-data")
+            self.assertIn("Laura", decoded["payloads"][0]["view"]["content"])
+            return {"reply": "Laura is visible in the inspected chat state."}
+
+        result = controller.run("Find Laura", agent, complete)
+        self.assertEqual(len(captured), 3)
+        self.assertIn("Laura", result["answer"])
+        self.assertEqual(result["trace"][1]["kind"], "tool")
+
     def test_v5_bridge_maps_semantic_repository_and_client_operations(self) -> None:
         calls = []
         agent = kernel.Kernel(authorities={"repo.read", "client.ui.inspect", "client.ui.control"})
         invoke = lambda name, args: calls.append((name, args)) or {"ok": True, "acknowledged": name == "client", "command_id": "cmd:1"}
         v5_bridge.register_repository(agent, invoke, route={"route_id": "fixture.ui", "workspace_root": "/workspace"})
-        v5_bridge.register_client(agent, {"runtime_type": "electron", "client_id": "electron-a", "capabilities": ["control.widget.open"]}, invoke)
+        client_manifest = {"runtime_type": "electron", "client_id": "electron-a", "capabilities": [
+            "control.widget.open", "control.browser.input_receipt", "control.browser.pointer.dispatch",
+        ]}
+        client_capabilities = adapters.live_client(client_manifest)
+        receipt_capability = next(item for item in client_capabilities if item["id"] == "client.browser.input_receipt")
+        pointer_capability = next(item for item in client_capabilities if item["id"] == "client.browser.pointer.dispatch")
+        javascript_capabilities = adapters.live_client({
+            **client_manifest, "capabilities": [*client_manifest["capabilities"], "control.browser.javascript.execute.unrestricted"],
+        })
+        observation_capability = next(item for item in javascript_capabilities if item["id"] == "client.browser.javascript.observe.unrestricted")
+        javascript_capability = next(item for item in javascript_capabilities if item["id"] == "client.browser.javascript.execute.unrestricted")
+        self.assertEqual(receipt_capability["input"]["required"], ["enabled"])
+        self.assertEqual(receipt_capability["input"]["properties"]["enabled"], {"type": "boolean"})
+        self.assertEqual(pointer_capability["input"]["required"], ["x", "y"])
+        self.assertEqual(pointer_capability["input"]["properties"]["x"]["maximum"], 65_535)
+        self.assertNotIn("command_id", pointer_capability["input"]["properties"])
+        self.assertIn("not prove a physical user click", pointer_capability["summary"])
+        self.assertIn("observation:{observed:true,target,predicate,result}", observation_capability["summary"])
+        self.assertEqual(observation_capability["completion_proof"], ["client.page.observation.observed"])
+        self.assertIn("differing before and after", javascript_capability["summary"])
+        self.assertEqual(javascript_capability["completion_proof"], ["client.page.postcondition.observed"])
+        self.assertEqual(
+            adapters.live_client({
+                **client_manifest, "capabilities": ["control.browser.javascript.execute.unrestricted"],
+            })[-1]["id"],
+            "client.browser.javascript.execute.unrestricted",
+        )
+        v5_bridge.register_client(agent, client_manifest, invoke)
         result = agent.run("Inspect and open", [
             {"id": "op.read", "cap": "repo.read", "args": {"path": "a.py"}},
-            {"id": "op.open", "cap": "client.widget.open", "args": {"client": "electron-a", "widget": "browser"}},
+            {"id": "op.open", "cap": "client.widget.open", "args": {"widget": "browser"}},
         ])
         self.assertTrue(result["ok"])
         self.assertEqual({name for name, _args in calls}, {"read", "client"})
         client_args = next(args for name, args in calls if name == "client")
         self.assertEqual(client_args["operation"], "open_widget")
         self.assertEqual(client_args["client_id"], "electron-a")
+        controls = agent.run("Enable receipts and dispatch", [
+            {"id": "op.receipt", "cap": "client.browser.input_receipt", "args": {"enabled": True}},
+            {"id": "op.pointer", "cap": "client.browser.pointer.dispatch", "args": {"x": 321, "y": 123}},
+        ])
+        self.assertTrue(controls["ok"])
+        control_args = [args for name, args in calls if name == "client" and args["operation"].startswith("browser_")]
+        self.assertEqual(control_args, [
+            {"operation": "browser_input_receipt", "client_id": "electron-a", "enabled": True, "wait_sec": 18},
+            {"operation": "browser_pointer_dispatch", "client_id": "electron-a", "x": 321, "y": 123, "wait_sec": 18},
+        ])
         mapped = agent.run("Map", [{"id": "op.map", "cap": "repo.map", "args": {}}])
         self.assertEqual(mapped["receipts"][0]["observed"]["route_id"], "fixture.ui")
 
@@ -320,18 +514,14 @@ class V6ControllerTests(unittest.TestCase):
                 return tool("discover", {"query": "map repository"})
             if index == 2:
                 return tool("execute", {"operations": [{"id": "op.map", "cap": "repo.map", "args": {}}]})
-            if index == 3:
-                self.assertNotIn("ready", decoded)
-                return tool("detail", {
-                    "kind": "evidence", "id": decoded["receipts"][0]["observed"]["evidence"],
-                })
             self.assertEqual(decoded["missing"], [])
             self.assertEqual(decoded["ready"], "answer")
+            self.assertEqual(decoded["payloads"][0]["trust"], "untrusted-data")
             return {"reply": "The repository map is complete."}
 
         result = controller.run("Check out the codebase", agent, complete)
         self.assertEqual(result["answer"], "The repository map is complete.")
-        self.assertEqual(len(result["trace"]), 4)
+        self.assertEqual(len(result["trace"]), 3)
 
     def test_exact_read_completion_is_not_satisfied_by_repository_map(self) -> None:
         agent = kernel.Kernel(authorities={"repo.read"}, completion_requirements={"repo.read"})

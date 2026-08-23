@@ -14,6 +14,12 @@ and retain a bounded diagnostic on the host.
 chrome. A disabled module remains hidden even when stale layout state says its
 widget was open.
 
+`space-widget-policy.js` owns browser-local widget layout isolation. User
+spaces start with no mapped widgets, infer only previously customized/opened
+legacy widgets, and honor an explicit per-space `__apps` mapping when present.
+Saved layouts are cloned at the shell boundary so switching spaces cannot make
+two spaces share the same mutable layout object.
+
 `widget-dimensions.js` owns shared resize limits. External apps may declare
 their minimum width and height in `app-registry.js`; Batch Cleaner declares a
 250px square minimum and adapts its contents with container queries.

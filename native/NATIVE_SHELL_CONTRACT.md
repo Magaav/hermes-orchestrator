@@ -89,8 +89,12 @@ Native shells that expose host diagnostics must keep the bridge operation-based
 and platform-gated. The Windows Android OAuth verifier is allowed only in the
 native Windows Electron shell, resolves its bundled local horc runner and APK
 from app resources before any development fallback, and runs fixed simulator
-arguments only after `adb devices` reports an authorized USB phone. Browser,
-PWA, and cloud-only modes must not receive arbitrary local command execution.
+arguments only after `adb devices` reports an authorized USB phone. Separately,
+the installed Windows shell may expose authenticated Master:frontier full-power
+operations for arbitrary Browser JavaScript and arbitrary current-user command
+execution. PWA-only, Android, and unauthenticated modes must not receive those
+capabilities; Windows execution inherits the app process token and does not
+implicitly elevate.
 
 ## Platform Status
 

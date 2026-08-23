@@ -1,5 +1,5 @@
 (() => {
-  const ANDROID_APP_BOOT_BUILD = "20260806-codex-status4";
+  const ANDROID_APP_BOOT_BUILD = "20260815-avatar-always-top1";
   const ANDROID_RUNTIME_MODE_STORAGE_KEY = "wasmAgent.androidRuntimeMode.v1";
 
   function androidNativeBootHint() {

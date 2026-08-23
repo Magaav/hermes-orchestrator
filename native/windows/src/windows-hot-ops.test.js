@@ -5,6 +5,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const mainJs = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
+const audioJs = fs.readFileSync(path.join(__dirname, "main", "audio-stimulus.js"), "utf8");
 const hermesOp = require(path.join(__dirname, "..", "ops", "android", "hermes-wake-proof.js"));
 
 assert(mainJs.includes('"run_hot_operation"'), "run_hot_operation must be allowlisted");
@@ -86,14 +87,16 @@ for (const field of ["downloadedRuntime", "activeRuntimeId", "activeRuntimeSha",
   assert(mainJs.includes(field), `downloaded runtime status must expose ${field}`);
 }
 assert(mainJs.includes("resolveBestVoiceWakeDiagnostics"), "diagnostics fallback primitive must exist");
-assert(mainJs.includes("function playWindowsWakePhraseProbe"), "Windows native-control must expose a bounded speaker wake probe");
-assert(mainJs.includes("System.Speech.Synthesis.SpeechSynthesizer"), "Windows speaker probe must use the fixed SpeechSynthesizer primitive");
-assert(mainJs.includes("function powershellSingleQuoted"), "Windows audio probes must safely embed bounded PowerShell literals");
-assert(mainJs.includes("$phrase = ${powershellSingleQuoted(phrase)};"), "Windows speaker probe must pass phrase as a sanitized literal");
-assert(!mainJs.includes("$synth.Speak($args[0])"), "Windows speaker probe must not rely on broken PowerShell argv passing");
-assert(mainJs.includes("function playWindowsAudioStimulus"), "Windows native-control must expose bounded non-speech audio stimuli");
-assert(mainJs.includes("windows_fixed_audio_stimulus"), "Windows audio stimulus must report the fixed primitive source");
-assert(mainJs.includes("[Console]::Beep(${frequencyHz}, ${durationMs});"), "Windows beep stimulus must embed bounded numeric arguments");
+assert(mainJs.includes("audioStimulus.playWakePhraseProbe"), "Windows native-control must delegate its bounded speaker wake probe");
+assert(audioJs.includes("System.Speech.Synthesis.SpeechSynthesizer"), "Windows speaker probe must use the fixed SpeechSynthesizer primitive");
+assert(audioJs.includes("function powershellSingleQuoted"), "Windows audio probes must safely embed bounded PowerShell literals");
+assert(audioJs.includes("$phrase = ${powershellSingleQuoted(phrase)};"), "Windows speaker probe must pass phrase as a sanitized literal");
+assert(!audioJs.includes("$synth.Speak($args[0])"), "Windows speaker probe must not rely on broken PowerShell argv passing");
+assert(mainJs.includes("audioStimulus.playAudioStimulus"), "Windows native-control must delegate bounded audio stimuli");
+assert(audioJs.includes("windows_fixed_audio_stimulus"), "Windows audio stimulus must report the fixed primitive source");
+assert(audioJs.includes("[Console]::Beep(${frequencyHz}, ${durationMs});"), "Windows beep stimulus must embed bounded numeric arguments");
+assert(audioJs.includes('"voice_inventory"'), "Windows audio stimulus must expose bounded installed-voice inventory");
+assert(audioJs.includes("$synth.SelectVoice($selected.Name)"), "Windows audio stimulus must select an exact installed voice");
 assert(mainJs.includes("native.capabilities.speaker.v1"), "Windows speaker primitive must be advertised as a native capability");
 
 const deniedIndex = mainJs.indexOf("function requireHotOperationCapability");

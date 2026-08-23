@@ -10,6 +10,27 @@ from . import contracts
 TOKENS = re.compile(r"[a-z0-9]+")
 
 
+def compact_capability(item: dict[str, Any]) -> dict[str, Any]:
+    """Project an executable argument hint without replaying the full schema."""
+    schema = item.get("input") if isinstance(item.get("input"), dict) else {}
+    properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+    required = {str(key) for key in (schema.get("required") or [])}
+    arguments = []
+    for name, raw in list(properties.items())[:8]:
+        field = raw if isinstance(raw, dict) else {}
+        default = field.get("default")
+        enum = field.get("enum") if isinstance(field.get("enum"), list) else []
+        value = contracts.canonical(default if "default" in field else enum[0]) if "default" in field or len(enum) == 1 else str(field.get("type") or "value")
+        arguments.append(f"{name}={value}{'!' if name in required else '?'}")
+    summary = str(item.get("summary") or "")
+    if arguments:
+        summary = f"{summary} args{{{';'.join(arguments)}}}"[:500]
+    return {
+        **{key: item.get(key) for key in ("id", "kind", "authority", "mode", "detail")},
+        "summary": summary,
+    }
+
+
 class Catalog:
     def __init__(self) -> None:
         self._items: dict[str, dict[str, Any]] = {}
@@ -41,6 +62,6 @@ class Catalog:
                 scored.append((score, item["id"], item))
         scored.sort(key=lambda row: (-row[0], row[1]))
         return [
-            {key: item.get(key) for key in ("id", "kind", "authority", "mode", "summary", "detail")}
+            compact_capability(item)
             for _score, _identifier, item in scored[:max(1, min(int(limit), 64))]
         ]

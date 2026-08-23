@@ -14,7 +14,7 @@ def _id(value: dict[str, Any]) -> str:
 
 
 def initial(goal: str) -> dict[str, Any]:
-    body = {"v": contracts.VERSION, "rev": 0, "goal": str(goal)[:4000], "known": [], "open": [], "plan": [], "status": "exploring", "decision": {}}
+    body = {"v": contracts.VERSION, "rev": 0, "goal": str(goal)[:4000], "goals": [], "known": [], "open": [], "plan": [], "status": "exploring", "decision": {}}
     return {"id": _id(body), **body}
 
 
@@ -41,6 +41,7 @@ def apply(current: dict[str, Any], delta: dict[str, Any]) -> dict[str, Any]:
     body = {
         "v": contracts.VERSION, "rev": int(current.get("rev") or 0) + 1,
         "goal": str(delta.get("goal") or current.get("goal") or "")[:4000],
+        "goals": (delta.get("goals") if isinstance(delta.get("goals"), list) else current.get("goals") or [])[:16],
         "known": known, "open": opened, "plan": plan[:128], "status": status,
         "decision": decision,
     }

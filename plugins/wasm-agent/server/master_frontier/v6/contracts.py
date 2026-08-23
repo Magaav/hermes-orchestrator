@@ -155,15 +155,21 @@ def capability(value: dict[str, Any]) -> dict[str, Any]:
     mode = str(value.get("mode") or ("write" if kind == "act" else "read"))
     if mode not in {"read", "write"}:
         raise ContractError("capability_mode_invalid")
+    terminal_result = value.get("terminal_result") is True
+    proof = [str(item)[:120] for item in (value.get("proof") or [])[:16]]
+    if terminal_result and not ((kind == "observe" and mode == "read") or (kind == "act" and mode == "write" and proof)):
+        raise ContractError("capability_terminal_result_unsafe")
     return {
         "v": VERSION, "id": cap_id, "kind": kind,
         "authority": str(value["authority"])[:160], "executor": str(value["executor"])[:240],
         "mode": mode, "summary": str(value.get("summary") or "")[:500],
         "input": value.get("input") if isinstance(value.get("input"), dict) else {"type": "object"},
         "result": value.get("result") if isinstance(value.get("result"), dict) else {"type": "object"},
-        "proof": [str(item)[:120] for item in (value.get("proof") or [])[:16]],
+        "proof": proof,
+        "completion_proof": [str(item)[:120] for item in (value.get("completion_proof") or [])[:16]],
         "conflicts": [str(item)[:240] for item in (value.get("conflicts") or [])[:16]],
         "requires_after": [str(item)[:160] for item in (value.get("requires_after") or [])[:16] if ID.fullmatch(str(item))],
+        "terminal_result": terminal_result,
         "detail": str(value.get("detail") or "")[:240],
     }
 
@@ -179,6 +185,8 @@ def operation(value: dict[str, Any]) -> dict[str, Any]:
         "args": value.get("args") if isinstance(value.get("args"), dict) else {},
         "after": list(dict.fromkeys(str(item) for item in (value.get("after") or []) if ID.fullmatch(str(item))))[:64],
         "expect": value.get("expect") if isinstance(value.get("expect"), dict) else {},
+        "completes_goal": value.get("completes_goal") is True,
+        "goal_id": str(value.get("goal_id") or "")[:160],
         "say": commentary(value.get("say")) if value.get("say") else None,
     }
 

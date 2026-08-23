@@ -312,6 +312,18 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
 
         self.assertEqual(projected["request_class"], "runtime_inspection")
 
+    def test_client_action_intent_outranks_its_runtime_evidence_floor(self) -> None:
+        projected = authority.project_task_contract({
+            "objective_kind": "model_decision",
+            "task_contract": {
+                "intent": "client_action",
+                "evidence_floor": "runtime",
+                "route_intent": "runtime_support",
+            },
+        }, {"caps": ["client.ui.inspect", "client.ui.control"]})
+
+        self.assertEqual(projected["request_class"], "client_action")
+
     def test_capability_presence_never_selects_runtime_modality(self) -> None:
         broad_route = {"caps": ["repo.read", "runtime.inspect"]}
         source = authority.project_task_contract({

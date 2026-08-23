@@ -783,6 +783,7 @@ set -e
 printf "builder arch=%s\n" "$(uname -m)"
 command -v npm
 command -v npx
+command -v go
 command -v wine || command -v wine64
 if command -v makensis >/dev/null 2>&1; then
   command -v makensis

@@ -28,8 +28,8 @@ Read first: `/local/AGENTS.md`, `/local/README.md`, `docs/context/MAP.md`,
 
 | Evidence | Status | Notes |
 | --- | --- | --- |
-| Local verified installer `WASM-Agent-Setup-x64-0.1.0-20260801T002745Z.exe` | verified | Built with `WASM_AGENT_SKIP_WIN_RESOURCE_EDIT=1`; verifier extracted the final NSIS payload and `app.asar`, which contains the native web-surface manager and manifest. Installer SHA `3fd4c3ee19a70a3ace883cc103e2fed4ef619dbaba0d0af60c795e354ecd44c0`; `app.asar` SHA `ae5b4bb3d332c85ad154b95806117db768a78f0669b645076a13ea1c9b38e1f3`. Package proof only; installed WhatsApp Web render/login/reopen proof is still required. |
-| `native/windows/release/VERIFY.json` | verified | Present for build `win-x64-20260615T135340Z`; package proof only, not installed runtime proof. |
+| Local verified installer `WASM-Agent-Setup-x64-0.1.0-20260820T195241Z.exe` | verified | Final NSIS extraction passed. Installer SHA `08b46bf491a25f7652a6765e2e7f17add00998cb488bccf8519880ba75ddbed1`; `app.asar` SHA `9bda2adfbd2fbbcfc71be760ff0553e49884f71594840da01026127e82483dec`. |
+| `native/windows/release/VERIFY.json` | verified | Build `win-x64-20260820T195241Z`; extracted receipt/pointer/full-power and installed-integrity modules, production defaults, and Google client ID are verified. Installed full-power runtime evidence is recorded in `reports/context/latest/master-frontier-full-power-client-runtime.json`. |
 | Windows package size audit | implemented-unverified | Re-run after the final NSIS build; `win-unpacked` is not release proof. |
 | Win11 staged update | implemented-unverified | Trigger Go Native / Check Update against the feed, install/restart, then prove the installed shell. |
 | Installed-app login persistence | implemented-unverified | Required Windows host proof absent. |
@@ -118,19 +118,82 @@ widget positions a real Chromium `WebContentsView` over its viewport and uses a
 persistent, surface-isolated session. Remote content is sandboxed, receives no
 Node.js API, accepts HTTPS navigation only, and has downloads and permissions
 denied until a separate explicit grant contract is implemented.
-Each surface strips Electron/product markers from its Chromium user agent before
-the first navigation so browser-version gates such as WhatsApp Web evaluate the
-embedded Chromium version instead of rejecting the Electron shell identity.
+Each surface strips Electron/product markers from its persistent session user
+agent before constructing the `WebContentsView`, so the renderer and its first
+request share one browser-compatible Chromium identity. Browser Reload bypasses
+the isolated session cache so a compatibility response saved by an older shell
+cannot survive an update.
+
+The source manager also declares `web_surface.input_receipt`. Receipt capture is
+disabled by default. The Browser Agent button explicitly invokes native
+operation `input-receipt` with `{enabled: true|false}`; disabling the mode
+clears its pending gesture, receipt, and expiry timer.
+
+While enabled, Electron's `before-mouse-event` boundary accepts only a matching
+left-button down/up gesture inside the current surface viewport and on the same
+main document. Right/middle, incomplete, navigated, blurred, or out-of-bounds
+input creates no receipt. The result is one redacted
+`hermes.wasm_agent.native_web_surface_input_receipt.v1` object with action
+`pointer.primary_gesture` and outcome `observed_pre_dispatch`. It proves only
+that native Chromium observed the primary gesture before page dispatch; it does
+not prove a click, DOM target, page handler, or page action succeeded.
+
+The manager retains at most `inputReceiptMaxPerSurface: 1`. Every accepted
+gesture replaces the prior receipt and arms a real, overwrite-safe expiry timer
+for `inputReceiptTtlMs: 120000`; an older timer cannot clear a newer receipt.
+Main-frame navigation or renderer loss clears the current receipt, and blur
+clears an unfinished gesture.
+
+Normal surface status omits receipt state. An on-demand request with
+`includeInputReceipt: true` returns `inputReceiptEnabled` plus `inputReceipt` as
+either `null` or the one fresh receipt. The bounded object contains receipt
+identity/time, action/outcome, left button, current-document state, age,
+redaction state, and validated `x`/`y`/viewport values. It contains no selector,
+DOM target, page content, form value, raw Electron event, or other page-derived
+data. Capture and disclosure use no page JavaScript, polling, renderer push, or
+persistence.
 
 Focused source proof:
 
 ```bash
-cd native/windows/src
-npm run test:web-surfaces
+npm --prefix native/windows/src run test:web-surfaces
+node --experimental-vm-modules plugins/wasm-agent/public/modules/client-observability.test.mjs
+node plugins/wasm-agent/tests/browser_widget_native_contract.test.mjs
 ```
 
-Source proof does not establish packaged or installed runtime behavior. A final
-NSIS extraction and installed-app navigation/login/reopen pass are required.
+These tests establish only the manager, explicit Browser Agent control,
+redacted on-demand projection, and Browser wiring source contracts. They do not
+establish packaged or installed runtime behavior. A final NSIS extraction and
+installed-app enable/gesture/receipt proof are still required;
+navigation/login/reopen remains a separate installed-app gate.
+
+## Full-power Master:frontier authority
+
+The installed Electron client deliberately exposes two unrestricted semantic
+operations to authenticated Master:frontier control:
+
+- `browser_javascript_execute_unrestricted` evaluates arbitrary JavaScript in
+  the selected Browser surface's page main world through the existing native
+  manager. It can inspect and change that page as the embedded browser session.
+- `windows_shell_execute_unrestricted` runs arbitrary PowerShell or CMD under
+  the Windows identity and integrity level already held by the installed app.
+  It inherits that user's filesystem, process, network, and credential access;
+  it does not silently elevate to Administrator or SYSTEM.
+
+There is intentionally no command or JavaScript allowlist. Authentication,
+exact live-client capability selection, command correlation, audit records,
+payload/output ceilings, and execution timeouts remain in force because they
+bound transport and make execution inspectable; they do not limit command
+semantics. Browser authority is confined to the selected native page context.
+Windows shell authority reaches everything available to the installed app's
+Windows user token. These capabilities are not advertised by plain PWA or
+Android clients.
+
+Build `win-x64-20260820T195241Z` passed the final extracted NSIS verifier with
+exact source-matching executor, manager, and manifest bytes. Installed runtime
+then returned command-correlated harmless receipts from arbitrary JavaScript in
+the WhatsApp page main world and PowerShell as Windows user `Victor`; see
+`reports/context/latest/master-frontier-full-power-client-runtime.json`.
 
 ## Bundled Windows supervisor
 
@@ -226,6 +289,14 @@ Authorization requires admin session, localhost operator access, or
 commands such as cache clear or restart require an explicit destructive gate.
 Unknown commands are refused. No global unauthenticated reload endpoint is
 allowed.
+
+Before declaring an open Windows app disconnected or selecting a target from
+`plugins/wasm-agent/state/native-control/heartbeats`, run
+`python3 tools/context/prove-production-native-control-authority.py`. The
+authenticated production `/native/control/clients` registry is authoritative;
+the repository-local heartbeat directory is only a potentially stale mirror.
+Queue restart or install commands only to a production-live ID and verify the
+receipt from that same production environment.
 
 Create or rotate the shared operator key with
 `python3 plugins/wasm-agent/scripts/ensure_native_control_key.py`. The private
@@ -526,6 +597,44 @@ installed shell already proves it; do not claim `play_audio_stimulus` is live in
 an installed app until the native shell containing that handler is rebuilt,
 installed, and proven through `get_native_kernel_status` or a successful command
 result.
+
+The downloaded hot operation `inspect_windows_audio_loopback` inventories at
+most 32 Windows AudioEndpoint devices through one fixed bounded PowerShell
+query. It classifies ready, disabled, missing, and non-default loopback capture
+routes without changing Windows settings. Run its production harness promise
+before acoustic browser-transcription tests:
+
+```bash
+python3 tools/windows/prove-audio-loopback.py --origin https://wa.colmeio.com
+```
+
+If the endpoint route passes but transcription reports `no-speech`, measure the
+actual default-capture samples while the same hot operation synthesizes speech:
+
+```bash
+python3 tools/windows/prove-audio-signal.py --origin https://wa.colmeio.com
+```
+
+The compact proof reports `peak`, `rms`, and `signalPresent`, separating a
+silent render/cable path from a downstream browser recognition failure without
+an installer rebuild.
+
+The proof passes only when a ready loopback endpoint such as Stereo Mix,
+Mixagem estéreo, VB-CABLE, VoiceMeeter Output, or a monitor endpoint is already
+the default recording route. A missing or disabled endpoint is runtime evidence
+for the next action, not permission to install a driver or mutate the user's
+audio defaults.
+
+After explicit user authorization, the downloaded hot operation
+`set_windows_audio_capture_default` can select one exact, ready capture endpoint
+for the current user's console, multimedia, and communications roles. It
+requires both the endpoint instance ID and its expected friendly name, supports
+dry-run, and returns bounded change evidence. Rerun the read-only loopback
+promise immediately after the change; the action result alone is not proof.
+
+Use `python3 tools/windows/set-audio-capture-default.py` with the exact endpoint
+ID and expected name. The wrapper is dry-run by default and requires `--apply`
+after explicit user authorization.
 
 Common diagnoses:
 

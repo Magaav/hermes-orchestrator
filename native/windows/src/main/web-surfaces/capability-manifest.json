@@ -5,13 +5,22 @@
     "web_surface.create",
     "web_surface.navigate",
     "web_surface.bounds",
+    "web_surface.snapshot",
     "web_surface.visibility",
     "web_surface.history",
+    "web_surface.input_receipt",
+    "web_surface.pointer.dispatch",
+    "web_surface.javascript.execute.unrestricted",
     "web_surface.status",
     "web_surface.close"
   ],
   "limits": {
     "maxSurfacesPerWindow": 8,
+    "inputReceiptMaxPerSurface": 1,
+    "inputReceiptTtlMs": 120000,
+    "pointerDispatchCorrelationMs": 2000,
+    "javascriptSourceMaxBytes": 1048576,
+    "javascriptResultMaxBytes": 524288,
     "protocols": ["https:"]
   }
 }

@@ -18,7 +18,7 @@ const SPACE_APP_DEFINITIONS = [
   },
   {
     id: "browser", label: "Browser", icon: "◎", module: "browser", desktopOnly: true,
-    entry: "/modules/browser/browser.entry.js",
+    entry: "/modules/browser/browser.entry.js?v=20260822-surface-readiness1",
   },
   {
     id: "anaminese", label: "Anaminese", icon: "🎙️", module: "anaminese",
@@ -48,6 +48,36 @@ const SPACE_APP_MAPPINGS = {
 
 const mounts = new Map();
 let onExternalAppClosed = null;
+const INTERACTION_OUTCOME_EVENT = "wasm-agent:interaction-outcome";
+
+function emitInteractionOutcome(detail = {}) {
+  if (typeof globalThis.dispatchEvent !== "function" || typeof globalThis.CustomEvent !== "function") return;
+  globalThis.dispatchEvent(new CustomEvent(INTERACTION_OUTCOME_EVENT, {
+    detail: {
+      at: new Date().toISOString(),
+      widget: String(detail.widget || "").slice(0, 80),
+      action: String(detail.action || "").slice(0, 80),
+      outcome: String(detail.outcome || "").slice(0, 80),
+      reason: String(detail.reason || "").slice(0, 160),
+    },
+  }));
+}
+
+function installAppClickOutcomeCapture() {
+  if (!globalThis.document?.addEventListener) return;
+  document.addEventListener("click", (event) => {
+    const button = event.target?.closest?.("[data-widget-app]");
+    if (!button) return;
+    queueMicrotask(() => emitInteractionOutcome({
+      widget: button.dataset.widgetApp,
+      action: "icon.click",
+      outcome: event.defaultPrevented ? "canceled" : "received",
+      reason: event.defaultPrevented ? "default_prevented" : "",
+    }));
+  }, { capture: true, passive: true });
+}
+
+installAppClickOutcomeCapture();
 
 function externalHost(app) {
   const existing = document.querySelector(`[data-external-app-host="${app.id}"]`);
@@ -136,10 +166,34 @@ export async function openExternalAppFromIcon(app, currentMinimized, onMinimized
   if (!app?.entry) return false;
   const host = externalHost(app);
   const nextMinimized = !Boolean(currentMinimized);
-  if (!nextMinimized) await ensureExternalAppMounted(app);
-  host.hidden = nextMinimized;
-  onMinimizedChange?.(nextMinimized);
-  return !nextMinimized;
+  emitInteractionOutcome({ widget: app.id, action: "widget.toggle", outcome: "started", reason: nextMinimized ? "minimize" : "open" });
+  try {
+    if (!nextMinimized) await ensureExternalAppMounted(app);
+    host.hidden = nextMinimized;
+    onMinimizedChange?.(nextMinimized);
+    emitInteractionOutcome({ widget: app.id, action: "widget.toggle", outcome: nextMinimized ? "minimized" : "opened" });
+    return !nextMinimized;
+  } catch (error) {
+    emitInteractionOutcome({ widget: app.id, action: "widget.toggle", outcome: "failed", reason: error?.message || error });
+    throw error;
+  }
 }
 
-export { SPACE_APP_DEFINITIONS, SPACE_APP_MAPPINGS };
+export async function ensureExternalAppOpen(app, currentMinimized, onMinimizedChange) {
+  if (!app?.entry) return { opened: false, alreadyOpen: false };
+  const host = externalHost(app);
+  const alreadyOpen = currentMinimized === false && mounts.has(app.id) && host.hidden === false;
+  emitInteractionOutcome({ widget: app.id, action: "widget.open", outcome: "started", reason: alreadyOpen ? "already_open" : "ensure_open" });
+  try {
+    await ensureExternalAppMounted(app);
+    host.hidden = false;
+    if (!alreadyOpen) onMinimizedChange?.(false);
+    emitInteractionOutcome({ widget: app.id, action: "widget.open", outcome: alreadyOpen ? "already_open" : "opened" });
+    return { opened: true, alreadyOpen };
+  } catch (error) {
+    emitInteractionOutcome({ widget: app.id, action: "widget.open", outcome: "failed", reason: error?.message || error });
+    throw error;
+  }
+}
+
+export { INTERACTION_OUTCOME_EVENT, SPACE_APP_DEFINITIONS, SPACE_APP_MAPPINGS };

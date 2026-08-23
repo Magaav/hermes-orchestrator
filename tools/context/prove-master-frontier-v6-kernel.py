@@ -16,7 +16,7 @@ SERVER = ROOT / "plugins/wasm-agent/server"
 REPORT = ROOT / "reports/context/latest/master-frontier-v6-kernel-result.json"
 sys.path.insert(0, str(SERVER))
 
-from master_frontier.v6 import adapters, controller, kernel, projection  # noqa: E402
+from master_frontier.v6 import adapters, contracts, controller, kernel, projection  # noqa: E402
 
 
 PAYLOAD_CHARS = 250_000
@@ -118,6 +118,113 @@ def parallel_proof() -> dict[str, Any]:
     return {"ok": result["ok"], "operations": 64, "peakConcurrentExecutors": peak}
 
 
+def compact_read_proof() -> dict[str, Any]:
+    agent = kernel.Kernel(authorities={"client.ui.inspect"})
+    client = {"runtime_type": "electron", "client_id": "electron-proof", "capabilities": []}
+    inspect = next(item for item in adapters.live_client(client) if item["id"] == "client.inspect")
+    agent.register(inspect, lambda _capability, _operation: {
+        "ok": True, "observed": {"chats": [{"name": "Laura", "selected": False}]},
+        "proof": ["client.status"],
+    })
+    prompts: list[str] = []
+
+    def complete(messages: list[dict[str, str]], _tools: list[dict[str, Any]], index: int) -> dict[str, Any]:
+        prompts.append(messages[-1]["content"])
+        if index == 1:
+            return tool("discover", {"query": "inspect chat"})
+        if index == 2:
+            return tool("execute", {"operations": [{"id": "inspect.chat", "cap": "client.inspect", "args": {}}]})
+        return {"reply": "Laura is visible."}
+
+    result = controller.run("Find Laura", agent, complete)
+    projected = projection.decode(prompts[-1])
+    payloads = projected.get("payloads") or []
+    return {
+        "providerCalls": len(result["trace"]),
+        "boundClientArgumentExposed": "client" in (inspect.get("input", {}).get("properties") or {}),
+        "untrustedPayloadCount": len(payloads),
+        "compactObservationVisible": bool(payloads and "Laura" in str(payloads[0].get("view", {}).get("content") or "")),
+    }
+
+
+def goal_action_proof() -> dict[str, Any]:
+    agent = kernel.Kernel(
+        authorities={"client.ui.inspect", "client.ui.control"},
+        completion_requirements={"goal_action"},
+    )
+    inspect = next(item for item in adapters.live_client({"runtime_type": "electron"}) if item["id"] == "client.inspect")
+    write = contracts.capability({
+        "id": "client.goal.write", "kind": "act", "authority": "client.ui.control",
+        "executor": "fixture.write", "mode": "write",
+    })
+    agent.register(inspect, lambda _capability, _operation: {"ok": True})
+    agent.register(write, lambda _capability, _operation: {"ok": True})
+    agent.run("Inspect", [{"id": "inspect", "cap": "client.inspect", "completes_goal": True}])
+    after_inspect = agent.completion_gaps()
+    agent.run("Setup", [{"id": "setup", "cap": "client.goal.write"}])
+    after_setup = agent.completion_gaps()
+    agent.run("Fulfill", [{"id": "fulfill", "cap": "client.goal.write", "completes_goal": True}])
+    snapshot = agent.snapshot(agent.run("Snapshot", [])["state"])
+    resumed = kernel.Kernel(
+        authorities={"client.ui.inspect", "client.ui.control"},
+        completion_requirements={"goal_action"},
+    )
+    resumed.register(inspect, lambda _capability, _operation: {"ok": True})
+    resumed.register(write, lambda _capability, _operation: {"ok": True})
+    resumed.restore(snapshot)
+    return {
+        "afterInspect": after_inspect,
+        "afterSetupWrite": after_setup,
+        "afterCorrelatedWrite": agent.completion_gaps(),
+        "afterResume": resumed.completion_gaps(),
+    }
+
+
+def client_action_loop_proof() -> dict[str, Any]:
+    manifest = {
+        "runtime_type": "electron", "client_id": "electron-proof",
+        "capabilities": ["control.browser.javascript.execute.unrestricted"],
+    }
+    javascript = next(
+        item for item in adapters.live_client(manifest)
+        if item["id"] == "client.browser.javascript.execute.unrestricted"
+    )
+    agent = kernel.Kernel(
+        authorities={"client.ui.control"}, completion_requirements={"goal_action"},
+    )
+    agent.register(javascript, lambda _capability, _operation: {
+        "ok": True, "state": "acknowledged", "observed": {"result": "sent"},
+        "proof": ["client.ack", "native.web_surface.javascript.execute.unrestricted", "client.page.postcondition.observed"],
+    })
+    visible = {javascript["id"]}
+    decisions = []
+
+    def complete(messages: list[dict[str, str]], _tools: list[dict[str, Any]], index: int) -> dict[str, Any]:
+        decoded = projection.decode(messages[-1]["content"])
+        if index in {1, 2}:
+            decisions.append("execute")
+            return tool("execute", {"goals": [{
+                "id": "message-sent", "cap": javascript["id"], "outcome": "Browser message is sent",
+            }], "operations": [{
+                "id": "send_message", "cap": javascript["id"],
+                "args": {"javascript": "return 'sent'"}, "completes_goal": True, "goal_id": "message-sent",
+            }]})
+        decisions.append("answer")
+        return {"reply": "Sent."}
+
+    result = controller.run(
+        "Send the message in the Browser widget", agent, complete,
+        initial_discovered=visible,
+    )
+    return {
+        "providerCalls": len(result["trace"]),
+        "decisions": decisions,
+        "completionGaps": agent.completion_gaps(),
+        "javascriptDiscoverableForSend": bool(agent.catalog.search("send message")),
+        "answer": result["answer"],
+    }
+
+
 def observed_v5_run() -> dict[str, Any]:
     path = ROOT / "reports/context/latest/avatar-chat-run-watch.json"
     if not path.exists():
@@ -137,6 +244,9 @@ def main() -> int:
     try:
         context = context_proof()
         parallel = parallel_proof()
+        compact_read = compact_read_proof()
+        goal_action = goal_action_proof()
+        client_action_loop = client_action_loop_proof()
         checks = {
             "constantFourProviderTools": context["providerToolCount"] == 4,
             "catalogScalesOutsidePrompt": context["registeredCapabilities"] == 513,
@@ -147,16 +257,31 @@ def main() -> int:
             "stablePrefixIsReusable": context["repeatedStableCharsOnSecondCall"] > 0,
             "operationReplayIsExactlyOnce": context["executorCallsAfterReplay"] == 1 and context["replayOk"],
             "independentOperationsRunInParallel": parallel["ok"] and parallel["operations"] == 64 and parallel["peakConcurrentExecutors"] == 8,
+            "compactReadAvoidsDetailTurn": compact_read["providerCalls"] == 3 and compact_read["untrustedPayloadCount"] == 1 and compact_read["compactObservationVisible"],
+            "boundClientIdentityIsHostOwned": compact_read["boundClientArgumentExposed"] is False,
+            "actionCompletionRequiresCorrelatedWrite": (
+                goal_action["afterInspect"] == ["completion:goal_action"]
+                and goal_action["afterSetupWrite"] == ["completion:goal_action"]
+                and goal_action["afterCorrelatedWrite"] == []
+                and goal_action["afterResume"] == []
+            ),
+            "clientActionLoopStaysWithinThreeCalls": (
+                client_action_loop["providerCalls"] <= 3
+                and client_action_loop["decisions"] == ["execute", "execute", "answer"]
+                and client_action_loop["completionGaps"] == []
+                and client_action_loop["javascriptDiscoverableForSend"]
+            ),
         }
         errors = [name for name, passed in checks.items() if not passed]
     except Exception as exc:  # noqa: BLE001 - proof must serialize its failure class.
-        context, parallel, checks = {}, {}, {}
+        context, parallel, compact_read, goal_action, client_action_loop, checks = {}, {}, {}, {}, {}, {}
         errors = [f"proof_exception:{type(exc).__name__}:{exc}"]
     report = {
         "ok": not errors,
         "classification": "master_frontier_v6_kernel_pass" if not errors else "master_frontier_v6_kernel_fail",
         "checkedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-        "context": context, "parallel": parallel, "checks": checks,
+        "context": context, "parallel": parallel, "compactRead": compact_read, "goalAction": goal_action,
+        "clientActionLoop": client_action_loop, "checks": checks,
         "observedV5Failure": observed_v5_run(), "errors": errors,
     }
     REPORT.parent.mkdir(parents=True, exist_ok=True)

@@ -6,6 +6,9 @@ const path = require("node:path");
 const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "wasm-agent-supervisor-client-"));
 process.env.WASM_AGENT_SUPERVISOR_STATE_DIR = temporary;
 const client = require("./supervisor-client");
+const clientSource = fs.readFileSync(path.join(__dirname, "supervisor-client.js"), "utf8");
+
+assert(clientSource.includes('["/S", "/currentuser"]'), "fallback update activation must stay silent and per-user");
 
 assert.strictEqual(client.supervisorStatus().state, "unavailable");
 fs.writeFileSync(path.join(temporary, "update-timeline.json"), JSON.stringify({ schema: "hermes.wasm_agent.windows_update_timeline.v1", phase: "installer_started", expectedBuildId: "win-x64-test" }));

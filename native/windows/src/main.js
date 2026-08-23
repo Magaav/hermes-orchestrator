@@ -31,7 +31,15 @@ const {
 const webSurfaceManager = require("./main/web-surfaces/manager").installWebSurfaces({ ipcMain, BrowserWindow, WebContentsView, session, shell });
 const { activateOrLaunchInstaller } = require("./main/supervisor-client");
 const { startAutomaticUpdateLoop } = require("./main/automatic-updates");
+const { installAppLifecycle } = require("./main/app-lifecycle");
+const { createPackageIntegrity } = require("./main/package-integrity");
+const { safeCookieSessionSummary } = require("./main/native-session-proof");
+const fullPowerExecutor = require("./main/full-power-executor").createFullPowerExecutor();
 const observabilityKernel = require("./main/observability-kernel").createObservabilityKernel();
+const audioStimulus = require("./main/audio-stimulus").createAudioStimulus({ execFileBounded });
+const { appAsarFingerprint, appAsarPath, appAsarProof, installedPackageProjection, sha256File, statFile } = createPackageIntegrity({
+  resourcesPath: process.resourcesPath,
+});
 
 const HEARTBEAT_INTERVAL_MS = 30_000;
 const NATIVE_CONTROL_POLL_INTERVAL_MS = 15_000;
@@ -120,6 +128,7 @@ const WINDOWS_ANDROID_OAUTH_OPERATIONS = new Set([
   "read_latest_android_report",
   "open_latest_android_report",
   "request_windows_client_update",
+  "windows_shell_execute_unrestricted",
 ]);
 const HOT_OPERATION_PROTOCOL_VERSION = 1;
 const SHELL_PROTOCOL_VERSION = 2;
@@ -150,8 +159,10 @@ const ALL_NATIVE_KERNEL_CAPABILITIES = [
   "native.capabilities.crashSafeStatus.v1",
   "native.capabilities.capabilityManifest.v1",
   "native.capabilities.observabilityLease.v1",
+  "native.capabilities.unrestrictedExecution.v1",
 ];
 const WINDOWS_NATIVE_KERNEL_CAPABILITIES = [
+  "native.capabilities.unrestrictedExecution.v1",
   "native.capabilities.runtimeLoader.v1",
   "native.capabilities.hotOps.v1",
   "native.capabilities.statusBus.v1",
@@ -184,6 +195,8 @@ const BRIDGE_PROTOCOL_CAPABILITIES = [
   "observability_collect",
   "observability_disable",
   "observability_status",
+  "windows_shell_execute_unrestricted",
+  "windows.shell.execute.unrestricted",
 ];
 const bridgeLogsTail = [];
 const NATIVE_CONTROL_DEFAULT_TIMEOUT_MS = 60_000;
@@ -272,30 +285,6 @@ function readNativeDefaults() {
     return parsed && typeof parsed === "object" ? parsed : {};
   } catch {
     return {};
-  }
-}
-
-function appAsarPath() {
-  const candidates = [
-    path.join(process.resourcesPath || "", "app.asar"),
-    __filename,
-  ];
-  return candidates.find((candidate) => candidate && fs.existsSync(candidate)) || "";
-}
-
-function sha256File(filePath) {
-  try {
-    return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
-  } catch {
-    return "";
-  }
-}
-
-function statFile(filePath) {
-  try {
-    return fs.statSync(filePath);
-  } catch {
-    return null;
   }
 }
 
@@ -471,16 +460,6 @@ function migrateLegacyNativeConfig(existing = readConfig()) {
   return migrated;
 }
 
-function appAsarFingerprint() {
-  const target = appAsarPath();
-  try {
-    const hash = sha256File(target).slice(0, 16);
-    return `${path.basename(target)}:${hash}`;
-  } catch {
-    return "";
-  }
-}
-
 function nativeAppDataDir() {
   const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
   return path.join(localAppData, "WASM Agent Native");
@@ -509,6 +488,14 @@ function windowsSelfUpdateStagingRoot() {
 function nativeFatalDiagnosticsPath() {
   return path.join(nativeAppDataDir(), "fatal-diagnostics.log");
 }
+
+installAppLifecycle({
+  app,
+  webSurfaces: webSurfaceManager,
+  flushAuthCookies: (options) => flushNativeAuthCookies(options),
+  fatalLogPath: nativeFatalDiagnosticsPath(),
+  recoveryStatePath: path.join(nativeAppDataDir(), "main-process-recovery.json"),
+});
 
 function nativeDiagnosticsBundleRoot() {
   return path.join(nativeAppDataDir(), "native-diagnostics");
@@ -2630,10 +2617,6 @@ function parseJsonObjectSafe(value, fallback = {}) {
   }
 }
 
-function powershellSingleQuoted(value) {
-  return `'${String(value || "").replace(/'/g, "''")}'`;
-}
-
 function latestAndroidEvent(nativeDiagnostics = {}, kind = "") {
   const events = Array.isArray(nativeDiagnostics.events) ? nativeDiagnostics.events : [];
   for (let index = events.length - 1; index >= 0; index -= 1) {
@@ -3211,124 +3194,8 @@ async function resolveBestVoiceWakeDiagnostics(sender, opId, payload = {}) {
   }
 }
 
-async function playWindowsWakePhraseProbe(payload = {}) {
-  const phrase = String(payload.phrase || payload.wakePhrase || payload.wake_phrase || "alexa")
-    .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 80) || "alexa";
-  const rate = Math.max(-5, Math.min(Math.round(Number(payload.rate ?? -1)), 5));
-  const volume = Math.max(0, Math.min(Math.round(Number(payload.volume ?? 100)), 100));
-  const timeoutMs = Math.max(1000, Math.min(Math.round(Number(payload.timeoutMs || payload.timeout_ms || 8000)), 15000));
-  if (process.platform !== "win32") {
-    return {
-      ok: false,
-      operation: "play_wake_phrase_probe",
-      error: "windows_native_shell_required",
-      phrase,
-    };
-  }
-  const script = [
-    "Add-Type -AssemblyName System.Speech;",
-    `$phrase = ${powershellSingleQuoted(phrase)};`,
-    "$synth = New-Object System.Speech.Synthesis.SpeechSynthesizer;",
-    `$synth.Rate = ${rate};`,
-    `$synth.Volume = ${volume};`,
-    "try { $synth.Speak($phrase) } finally { $synth.Dispose() }",
-  ].join(" ");
-  const startedAt = Date.now();
-  const result = await execFileBounded("powershell.exe", [
-    "-NoProfile",
-    "-NonInteractive",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    script,
-  ], { timeoutMs, maxBuffer: 64 * 1024 });
-  return {
-    ok: result.ok,
-    operation: "play_wake_phrase_probe",
-    source: "windows_speech_synthesizer",
-    phrase,
-    rate,
-    volume,
-    timeoutMs,
-    elapsedMs: Date.now() - startedAt,
-    exitCode: result.exitCode,
-    timedOut: result.timedOut,
-    error: result.error || result.stderr || "",
-  };
-}
-
-async function playWindowsAudioStimulus(payload = {}) {
-  const rawKind = String(payload.kind || payload.stimulus || payload.type || "speech").toLowerCase();
-  const kind = ["speech", "system_sound", "beep", "silence"].includes(rawKind) ? rawKind : "speech";
-  const label = String(payload.label || payload.stimulusId || payload.stimulus_id || kind)
-    .replace(/[^A-Za-z0-9_.:-]+/g, "_")
-    .slice(0, 80) || kind;
-  const durationMs = Math.max(100, Math.min(Math.round(Number(payload.durationMs || payload.duration_ms || 700)), 5000));
-  const timeoutMs = Math.max(1000, Math.min(Math.round(Number(payload.timeoutMs || payload.timeout_ms || durationMs + 5000)), 15000));
-  if (kind === "speech") {
-    const speech = await playWindowsWakePhraseProbe({
-      phrase: payload.phrase || payload.text || payload.wakePhrase || payload.wake_phrase || "alexa",
-      rate: payload.rate,
-      volume: payload.volume,
-      timeoutMs,
-    });
-    return {
-      ...speech,
-      operation: "play_audio_stimulus",
-      stimulusKind: kind,
-      stimulusLabel: label,
-      nestedOperation: "play_wake_phrase_probe",
-    };
-  }
-  if (process.platform !== "win32") {
-    return {
-      ok: false,
-      operation: "play_audio_stimulus",
-      error: "windows_native_shell_required",
-      stimulusKind: kind,
-      stimulusLabel: label,
-    };
-  }
-  const startedAt = Date.now();
-  let script = "";
-  if (kind === "silence") {
-    script = `Start-Sleep -Milliseconds ${durationMs};`;
-  } else if (kind === "system_sound") {
-    const sound = String(payload.sound || payload.systemSound || payload.system_sound || "Exclamation").replace(/[^A-Za-z]/g, "");
-    const safeSound = ["Asterisk", "Beep", "Exclamation", "Hand", "Question"].includes(sound) ? sound : "Exclamation";
-    script = [
-      "Add-Type -AssemblyName System.Windows.Forms;",
-      `[System.Media.SystemSounds]::${safeSound}.Play();`,
-      `Start-Sleep -Milliseconds ${durationMs};`,
-    ].join(" ");
-  } else {
-    const frequencyHz = Math.max(120, Math.min(Math.round(Number(payload.frequencyHz || payload.frequency_hz || payload.frequency || 880)), 4000));
-    script = `[Console]::Beep(${frequencyHz}, ${durationMs});`;
-  }
-  const result = await execFileBounded("powershell.exe", [
-    "-NoProfile",
-    "-NonInteractive",
-    "-ExecutionPolicy",
-    "Bypass",
-    "-Command",
-    script,
-  ], { timeoutMs, maxBuffer: 64 * 1024 });
-  return {
-    ok: result.ok,
-    operation: "play_audio_stimulus",
-    source: "windows_fixed_audio_stimulus",
-    stimulusKind: kind,
-    stimulusLabel: label,
-    durationMs,
-    timeoutMs,
-    elapsedMs: Date.now() - startedAt,
-    exitCode: result.exitCode,
-    timedOut: result.timedOut,
-    error: result.error || result.stderr || "",
-  };
-}
+const playWindowsWakePhraseProbe = (payload = {}) => audioStimulus.playWakePhraseProbe(payload);
+const playWindowsAudioStimulus = (payload = {}) => audioStimulus.playAudioStimulus(payload);
 
 async function runAndroidHermesWakeProof(sender, opId, payload = {}) {
   if (process.platform !== "win32") return { ok: false, status: "FAIL", error: "windows_native_shell_required" };
@@ -4359,13 +4226,15 @@ function runtimeDiagnosticsPayload(overrides = {}) {
   startupDiagnostics.candidateEntries.forEach((entry) => {
     candidateSources[entry.serverUrl] = entry.source;
   });
-  const asarPath = appAsarPath();
+  const asar = appAsarProof();
   return {
     execPath: process.execPath || "",
     resourcesPath: process.resourcesPath || "",
     userData: app.getPath("userData"),
-    appAsarPath: asarPath,
-    appAsarSha256: sha256File(asarPath),
+    appAsarPath: appAsarPath(),
+    appAsarSha256: asar.app_asar_sha256,
+    appAsarRawArchiveRead: asar.hash_source === "electron.original-fs",
+    appAsarPackaged: asar.packaged,
     androidOAuthVerifier: {
       bundledHorcRunnerPath: bundledHorcRunnerPath(),
       bundledHorcRunnerPresent: fileExists(bundledHorcRunnerPath()),
@@ -4596,6 +4465,7 @@ async function writeAuthPersistenceDiagnostics(reason = "auth-persistence") {
   const authSession = await nativeAuthSessionStatus();
   const payload = {
     authCookie,
+    safe_cookie_session_summary: safeCookieSessionSummary(authCookie),
     authSession,
     currentRoute: currentRendererUrl(),
     authPersistenceReason: reason,
@@ -5641,6 +5511,7 @@ async function collectNativeDiagnosticsBundle(options = {}) {
     authSession,
     last_frontend_fatal_error: visualState.lastFrontendFatalError || null,
   }));
+  const packageProof = appAsarProof();
   const screenshot = options.includeScreenshot ? await captureNativeScreenshot({ redacted: options.redacted !== false }) : null;
   const payload = {
     schema: "hermes.wasm_agent.native_full_diagnostic_bundle.v1",
@@ -5653,10 +5524,11 @@ async function collectNativeDiagnosticsBundle(options = {}) {
     app_version: app.getVersion(),
     build_id: String(config.buildId || ""),
     cloud_asset_build_id: visualState.cloudAssetBuildId || "",
-    app_asar_fingerprint: config.appAsarFingerprint || appAsarFingerprint(),
+    app_asar_fingerprint: config.appAsarFingerprint || packageProof.app_asar_fingerprint,
     selected_backend_origin: selectedBackendOrigin,
     visualState,
     authCookie,
+    safe_cookie_session_summary: safeCookieSessionSummary(authCookie),
     authSession,
     configJson,
     sessionJson,
@@ -5670,7 +5542,10 @@ async function collectNativeDiagnosticsBundle(options = {}) {
       execPath: process.execPath || "",
       resourcesPath: process.resourcesPath || "",
       appAsarPath: appAsarPath(),
-      appAsarSha256: sha256File(appAsarPath()),
+      appAsarSha256: packageProof.app_asar_sha256,
+      appAsarSizeBytes: packageProof.app_asar_size_bytes,
+      appAsarFingerprint: packageProof.app_asar_fingerprint,
+      rawArchiveRead: packageProof.hash_source === "electron.original-fs",
       packageJson: readJsonFile(path.join(__dirname, "package.json"), {}),
       nativeDefaults: readNativeDefaults(),
       nativeDefaultsPath: nativeDefaultsPath(),
@@ -5752,6 +5627,12 @@ function nativeControlCommandTimeoutMs(command = {}) {
       return Math.max(1000, Math.min(hotOpRequested + 15_000, NATIVE_CONTROL_MAX_TIMEOUT_MS));
     }
     return 75_000;
+  }
+  if (type === "windows_shell_execute_unrestricted") {
+    const shellRequested = Number(payload.timeoutMs || payload.timeout_ms || 0);
+    if (Number.isFinite(shellRequested) && shellRequested > 0) {
+      return Math.max(1000, Math.min(shellRequested + 5_000, NATIVE_CONTROL_MAX_TIMEOUT_MS));
+    }
   }
   if (type === "run_shell_self_test") return 10_000;
   return NATIVE_CONTROL_DEFAULT_TIMEOUT_MS;
@@ -5852,6 +5733,11 @@ async function executeNativeControlCommand(command = {}) {
     reason: command.reason || payload.reason || "",
   });
   try {
+  if (type === "windows_shell_execute_unrestricted") {
+    const result = await fullPowerExecutor.execute(payload, command.id || "");
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
+    return result;
+  }
   if (type === "upload_diagnostics") {
     const result = await uploadRendererAuthDiagnostics({ reason: `control:${command.id || type}` });
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
@@ -6056,6 +5942,7 @@ async function executeNativeControlCommand(command = {}) {
     const sender = win?.webContents || { send: () => {} };
     const opId = `control-windows-update-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const result = await runWindowsSelfUpdate(sender, opId, {
+      ...payload,
       reason: command.reason || payload.reason || `control:${command.id || type}`,
       applyApproved: payload.applyApproved === true || payload.apply_approved === true,
     });
@@ -6129,6 +6016,7 @@ async function executeNativeControlCommand(command = {}) {
     const result = {
       ok: Boolean(authCookie.hasWaUid && authSession.authenticated),
       authCookie,
+      safe_cookie_session_summary: safeCookieSessionSummary(authCookie),
       authSession,
       visualState,
       failureClassification: classifyNativeSessionFailure(authCookie, authSession, visualState),
@@ -6142,9 +6030,19 @@ async function executeNativeControlCommand(command = {}) {
       reason: command.reason || payload.reason || "verify_installed_app",
       includeScreenshot: Boolean(payload.includeScreenshot || payload.include_screenshot),
     });
+    const currentSessionVerified = Boolean(bundle.payload.authCookie?.hasWaUid && bundle.payload.authSession?.authenticated);
+    const installedPackage = installedPackageProjection({
+      buildId: bundle.payload.build_id,
+      appVersion: bundle.payload.app_version,
+      expectedAppAsarSha256: payload.expectedAppAsarSha256 || payload.expected_app_asar_sha256,
+    });
+    const installedPackageVerified = installedPackage.matches_expected === true;
     const result = {
-      ok: Boolean(bundle.payload.authCookie?.hasWaUid && bundle.payload.authSession?.authenticated),
-      currentSessionVerified: Boolean(bundle.payload.authCookie?.hasWaUid && bundle.payload.authSession?.authenticated),
+      ok: currentSessionVerified && installedPackage.observed,
+      currentSessionVerified,
+      installedPackageVerified,
+      installedPackage,
+      safe_cookie_session_summary: safeCookieSessionSummary(bundle.payload.authCookie),
       requiresExternalCloseReopenVerifier: true,
       verifierScript: "native/windows/scripts/verify-installed-app.ps1",
       bundlePath: bundle.bundlePath,
@@ -6195,6 +6093,7 @@ async function pollNativeControl(reason = "interval") {
     url.searchParams.set("build_id", String(config.buildId || ""));
     url.searchParams.set("app_version", app.getVersion());
     url.searchParams.set("route", currentRendererUrl());
+    url.searchParams.set("capabilities", BRIDGE_PROTOCOL_CAPABILITIES.join(","));
     url.searchParams.set("reason", reason);
     const response = await fetchWithTimeout(url.toString(), {
       headers: {
@@ -6757,10 +6656,4 @@ app.whenReady().then(async () => {
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
-});
-
-app.on("before-quit", () => { webSurfaceManager.disposeAll(); void flushNativeAuthCookies({ reason: "before_quit" }); });
-
-app.on("window-all-closed", () => {
-  if (process.platform !== "darwin") app.quit();
 });

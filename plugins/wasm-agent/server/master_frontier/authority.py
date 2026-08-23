@@ -43,6 +43,7 @@ _CLASS_TOOLS = {
     "source_investigation": _READ_TOOLS,
     "implementation_planning": _READ_TOOLS,
     "runtime_inspection": _RUNTIME_TOOLS,
+    "client_action": _RUNTIME_TOOLS,
     "implementation": _IMPLEMENTATION_TOOLS,
     "verification": _VERIFICATION_TOOLS,
 }
@@ -53,6 +54,7 @@ _CLASS_DEFAULT_AUTHORITY = {
     "source_investigation": frozenset({REPO_READ, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
     "implementation_planning": frozenset({REPO_READ, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
     "runtime_inspection": frozenset({RUNTIME_INSPECT, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
+    "client_action": frozenset({SESSION_MEMORY_READ, BROWSER_INSPECT, BROWSER_CONTROL, CLIENT_UI_INSPECT, CLIENT_UI_CONTROL}),
     "implementation": frozenset({REPO_READ, REPO_EDIT, TEST_RUN, PROOF_REPORT, SESSION_MEMORY_READ, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
     "verification": frozenset({REPO_READ, TEST_RUN, PROOF_REPORT, SESSION_MEMORY_READ}),
 }
@@ -60,7 +62,7 @@ _KNOWN_CAPABILITIES = frozenset({REPO_READ, REPO_EDIT, TEST_RUN, RUNTIME_INSPECT
 _CONCRETE_EVIDENCE_CLASSES = {
     "conceptual": frozenset({"conversation", "general_conversation", "model_decision"}),
     "source": frozenset({"source_investigation", "implementation_planning", "implementation", "verification"}),
-    "runtime": frozenset({"runtime_inspection", "implementation"}),
+    "runtime": frozenset({"runtime_inspection", "client_action", "implementation"}),
     "proof": frozenset({"implementation", "verification"}),
 }
 _EVIDENCE_CAPABILITY_OPTIONS = {
@@ -90,6 +92,8 @@ def _project_request_class(contract: dict[str, Any], objective_kind: str) -> str
         return "implementation"
     if intent == "verification":
         return "verification"
+    if intent == "client_action":
+        return "client_action"
     if evidence == "runtime" or route_intent == "runtime_support":
         return "runtime_inspection"
     if evidence == "source":
@@ -103,6 +107,7 @@ def _project_request_class(contract: dict[str, Any], objective_kind: str) -> str
         "capability_inquiry": "conversation",
         "diagnosis": "source_investigation",
         "runtime_inspection": "runtime_inspection",
+        "client_action": "client_action",
         "source_investigation": "source_investigation",
     }.get(intent, intent)
 
