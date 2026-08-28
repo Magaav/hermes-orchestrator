@@ -42,6 +42,7 @@ const { WINDOWS_DESKTOP_OPERATIONS, createWindowsDesktopControl } = require("./m
 const { createWindowsNativeCommands } = require("./main/windows-native-commands");
 const { createDispatcherHealth } = require("./main/dispatcher-health");
 const { createHotOpsSyncControl } = require("./main/hot-ops-sync-control");
+const { compactSyncResult, projectHotOpsCatalog } = require("./main/hot-ops-catalog");
 const windowsNativeCommands = createWindowsNativeCommands({ companion: () => companionOverlay, desktop: { operations: WINDOWS_DESKTOP_OPERATIONS, control: createWindowsDesktopControl() } });
 const { clearWebShellCache } = require("./main/web-shell-session");
 const { ALL_NATIVE_KERNEL_CAPABILITIES, BRIDGE_PROTOCOL_CAPABILITIES, WINDOWS_NATIVE_KERNEL_CAPABILITIES } = require("./main/native-capabilities");
@@ -1617,23 +1618,9 @@ function activeHotOperationsRoot() {
 }
 
 function hotOperationsSummary() {
+  const options = arguments[0] || {};
   const active = activeHotOperationsRoot();
-  const availableHotOps = scanHotOperationManifests().map((op) => ({
-    name: op.name,
-    version: op.version,
-    entry: op.entry,
-    manifest: op.manifest,
-    loadedFrom: op.loadedFrom,
-    sha256: op.sha256,
-    capabilities: op.capabilities,
-    requiredNativeCapabilities: op.requiredNativeCapabilities,
-    operationId: op.operationId,
-    inputsSchema: op.inputsSchema,
-    outputsSchema: op.outputsSchema,
-    safetyLimits: op.safetyLimits,
-    rollback: op.rollback,
-    timeoutMs: op.timeoutMs,
-  }));
+  const catalog = projectHotOpsCatalog(scanHotOperationManifests(), options);
   return {
     shellProtocolVersion: SHELL_PROTOCOL_VERSION,
     supportedHotOpsProtocol: HOT_OPERATION_PROTOCOL_VERSION,
@@ -1647,7 +1634,7 @@ function hotOperationsSummary() {
     localOverrideRoot: localHotOperationOverrideRoot(),
     hotOpsDisabled: hotOperationsDisabled(),
     hotOpsRequireSha: hotOperationsRequireSha(),
-    downloadedHotOpsSync: lastHotOperationBundleSync,
+    downloadedHotOpsSync: compactSyncResult(lastHotOperationBundleSync),
     downloadedRuntime: downloadedRuntimeSummary(),
     hotOpsRoots: hotOperationRoots().map((item) => ({
       kind: item.kind,
@@ -1655,7 +1642,10 @@ function hotOperationsSummary() {
       active: item.root === active.root,
       exists: item.exists,
     })),
-    availableHotOps,
+    hotOpsCatalog: catalog.catalog,
+    hotOpsCatalogOk: catalog.ok,
+    hotOpsCatalogFailureClassification: catalog.failureClassification,
+    availableHotOps: catalog.availableHotOps,
   };
 }
 
@@ -1808,11 +1798,14 @@ function bundledHotOperationSha(operationName = "") {
 }
 
 function listHotOperations() {
-  const summary = hotOperationsSummary();
+  const options = arguments[0] || {};
+  const summary = hotOperationsSummary(options);
   return {
-    ok: true,
+    ok: summary.hotOpsCatalogOk === true,
+    failureClassification: summary.hotOpsCatalogFailureClassification,
     ...summary,
-    logsTail: recentBridgeLogsTail(),
+    logsTail: options.includeLogs === true || options.include_logs === true ? recentBridgeLogsTail(20) : [],
+    logCount: bridgeLogsTail.length,
   };
 }
 

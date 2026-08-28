@@ -510,10 +510,12 @@ a camelCase result envelope with `rawResult` preserved.
 
 Use `list_hot_operations` to inspect the installed bridge view before a proof
 run. It reports `supportedHotOpsProtocol`, `hotOpsMode`, `hotOpsRoot`,
-`devReload`, every root, and `availableHotOps` with manifest path, entry,
-version, SHA-256, capabilities, timeout, and loaded source.
-`list_hot_operations` accepts `forceSync: true` to fetch the release feed and
-compare trusted downloaded bundle metadata against the local cache. Shells with
+`devReload`, every root, and a compact `availableHotOps` identity catalog.
+Request one operation's full manifest contract on demand with
+`{"operationName":"<exact-name>"}`. Broad detail requests without an exact
+operation fail with `hot_operation_reference_required`. Raw bridge logs are
+excluded by default; request at most 20 recent entries with `{"includeLogs":true}`.
+Shells with
 the refresh capability also accept `refresh_downloaded_hot_ops` or
 `sync_downloaded_hot_ops`, which force the same sync and report
 `downloadedHotOpsSync.ok`, `changed`, `feedBundleId`, `cachedBundleId`,

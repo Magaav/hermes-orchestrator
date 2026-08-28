@@ -55,6 +55,7 @@
     "main/supervisor-client.js",
     "main/dispatcher-health.js",
     "main/hot-ops-sync-control.js",
+    "main/hot-ops-catalog.js",
     "main/observability-kernel.js",
     "main/audio-stimulus.js",
     "main/automatic-updates.js",

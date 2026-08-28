@@ -43,9 +43,9 @@ function createHotOpsSyncControl({ sync, list, logs = () => [], audit = () => {}
     return { ok: true, operation, accepted: true, deduplicated: false, completed: false, syncLifecycle: snapshot(), logsTail: logs() };
   };
 
-  const inspect = (operation = "list_hot_operations") => ({ ...list(), operation, syncLifecycle: snapshot() });
+  const inspect = (payload = {}, operation = "list_hot_operations") => ({ ...list(payload), operation, syncLifecycle: snapshot() });
   const handle = (type, payload = {}) => {
-    if (type === "list_hot_operations") return { handled: true, result: inspect(type) };
+    if (type === "list_hot_operations") return { handled: true, result: inspect(payload, type) };
     if (type === "refresh_downloaded_hot_ops" || type === "sync_downloaded_hot_ops") return { handled: true, result: start(payload, type) };
     return { handled: false, result: null };
   };

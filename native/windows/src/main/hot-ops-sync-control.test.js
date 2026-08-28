@@ -12,7 +12,7 @@ assert(buildConfig.files.includes("main/hot-ops-sync-control.js"));
 (async () => {
   let resolveSync; let calls = 0; let clock = Date.parse("2026-08-28T14:00:00Z");
   const control = createHotOpsSyncControl({
-    now: () => clock, stuckMs: 1000, list: () => ({ ok: true, availableHotOps: [{ name: "canary" }] }),
+    now: () => clock, stuckMs: 1000, list: (payload) => ({ ok: true, requested: payload.operationName || "", availableHotOps: [{ name: "canary" }] }),
     sync: () => { calls += 1; return new Promise((resolve) => { resolveSync = resolve; }); },
   });
   const started = control.handle("sync_downloaded_hot_ops", {});
@@ -22,6 +22,7 @@ assert(buildConfig.files.includes("main/hot-ops-sync-control.js"));
   assert.strictEqual(duplicate.result.deduplicated, true); assert.strictEqual(calls, 1);
   const listed = control.handle("list_hot_operations", {});
   assert.strictEqual(listed.result.availableHotOps[0].name, "canary"); assert.strictEqual(listed.result.syncLifecycle.phase, "running");
+  assert.strictEqual(control.handle("list_hot_operations", { operationName: "canary" }).result.requested, "canary");
   clock += 1500; assert.strictEqual(control.snapshot().stuck, true);
   resolveSync({ ok: true, changed: true, feedBundleId: "bundle-current", bundles: [{ files: ["x".repeat(100_000)] }] }); await new Promise((resolve) => setImmediate(resolve));
   assert.strictEqual(control.snapshot().phase, "completed"); assert.strictEqual(control.snapshot().changed, true);
