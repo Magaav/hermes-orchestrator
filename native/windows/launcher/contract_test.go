@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestValidateInstaller(t *testing.T) {
@@ -36,6 +37,27 @@ func TestCapabilityContract(t *testing.T) {
 	}
 	if len(supervisorCapabilities) < 5 {
 		t.Fatalf("capability surface unexpectedly small: %v", supervisorCapabilities)
+	}
+}
+
+func TestDispatcherRecoveryPolicy(t *testing.T) {
+	now := time.Date(2026, 8, 28, 0, 0, 0, 0, time.UTC)
+	lease := dispatcherLease{Schema: dispatcherLeaseSchema, Active: true, CommandID: "cmd-1", DeadlineAt: now.Add(-6 * time.Second).Format(time.RFC3339)}
+	if !dispatcherLeaseExpired(lease, now) {
+		t.Fatal("expired active lease must recover")
+	}
+	lease.Active = false
+	if dispatcherLeaseExpired(lease, now) {
+		t.Fatal("finished lease must not recover")
+	}
+	if !recoveryAllowed(nil, time.Time{}, now) {
+		t.Fatal("first recovery must be allowed")
+	}
+	if recoveryAllowed(nil, now.Add(-10*time.Second), now) {
+		t.Fatal("cooldown must suppress restart")
+	}
+	if recoveryAllowed([]time.Time{now.Add(-2 * time.Minute), now.Add(-time.Minute)}, now.Add(-time.Minute), now) {
+		t.Fatal("window budget must suppress restart loop")
 	}
 }
 

@@ -1,0 +1,39 @@
+{
+  "schema": "hermes.wasm_agent.hot_operation_manifest.v1",
+  "name": "inspect_windows_audio_loopback",
+  "version": "20260811T1845",
+  "entry": "windows-audio-loopback-probe.js",
+  "operationId": "inspect_windows_audio_loopback",
+  "requiredNativeCapabilities": [
+    "native.capabilities.hotOps.v1",
+    "native.capabilities.boundedCommand.v1"
+  ],
+  "capabilities": [],
+  "timeoutMs": 15000,
+  "inputsSchema": {
+    "type": "object",
+    "additionalProperties": false
+  },
+  "outputsSchema": {
+    "type": "object",
+    "required": [
+      "ok",
+      "probeOk",
+      "operation",
+      "failureClassification",
+      "captureEndpoints",
+      "loopbackCandidates",
+      "nextAction"
+    ]
+  },
+  "safetyLimits": {
+    "network": false,
+    "filesystem": false,
+    "executable": "powershell.exe",
+    "arguments": "fixed AudioEndpoint inventory only",
+    "maxOutputBytes": 65536
+  },
+  "rollback": {
+    "mode": "noop"
+  }
+}

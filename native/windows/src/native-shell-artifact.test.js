@@ -17,6 +17,8 @@ for (const artifact of artifacts) {
   assert(files.includes("/preload.js"), `${artifact} must include preload.js`);
   assert(files.includes("/native-backend-resolver.js"), `${artifact} must include native-backend-resolver.js`);
   assert(files.includes("/native-shell-policy.js"), `${artifact} must include native-shell-policy.js`);
+  assert(files.includes("/main/companion-overlay.js"), `${artifact} must include the companion overlay owner`);
+  assert(files.includes("/main/windows-desktop-control.js"), `${artifact} must include the Windows desktop control owner`);
 
   const mainJs = asar.extractFile(artifact, "main.js").toString("utf8");
   const preloadJs = asar.extractFile(artifact, "preload.js").toString("utf8");
@@ -47,7 +49,7 @@ for (const artifact of artifacts) {
   assert(!fallbackHtml.includes("googleSignInButton") && !fallbackHtml.includes("authGateGoogleSignInButton") && !fallbackHtml.includes("accounts.google.com"), `${artifact} fallback shell must not contain Google login UI`);
   if (artifact.includes(`${path.sep}win-unpacked${path.sep}`)) {
     assert(mainJs.includes("Promise.all(candidates.map"), `${artifact} must probe backend candidates in parallel for fast first paint`);
-    assert(mainJs.includes("clearNativeWebShellCache"), `${artifact} must clear stale service-worker shell caches on startup`);
+    assert(mainJs.includes("clearWebShellCache"), `${artifact} must delegate stale service-worker shell cache clearing on startup`);
     assert(mainJs.includes("nativeAuthCookieStatus") && mainJs.includes("waitForNativeAuthCookie") && mainJs.includes("cookies.flushStore") && mainJs.includes("wasm-agent:native-flush-auth-cookies"), `${artifact} must wait for and flush persistent cookies after login`);
     assert(mainJs.includes("session.defaultSession.fetch") && mainJs.includes("nativeAuthSessionStatus") && mainJs.includes("auth-persistence-status"), `${artifact} must verify /auth/session through the Electron cookie jar after reopen`);
     assert(mainJs.includes("expirationDate") && mainJs.includes("session: Boolean(cookie.session)") && mainJs.includes("cookieMeta"), `${artifact} must report durable wa_uid cookie metadata`);

@@ -1,0 +1,57 @@
+name: Native Sync Windows Build
+
+on:
+  push:
+    branches:
+      - codex/native-sync-build-20260828
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: native/windows/src/package-lock.json
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+          cache-dependency-path: native/windows/launcher/go.sum
+
+      - name: Install native shell dependencies
+        working-directory: native/windows/src
+        run: npm ci
+
+      - name: Verify supervisor and sync lifecycle
+        working-directory: native/windows/src
+        run: npm run test:windows-supervisor
+
+      - name: Build and verify final NSIS installer
+        working-directory: native/windows/src
+        env:
+          WASM_AGENT_DEFAULT_SERVER_URL: https://wa.colmeio.com
+        run: npm run build:win:x64
+
+      - name: Prove sync owner is packaged in app.asar
+        shell: pwsh
+        run: |
+          $asar = "native/windows/release/win-unpacked/resources/app.asar"
+          $listing = & "native/windows/src/node_modules/.bin/asar.cmd" list $asar
+          if ($listing -notcontains "\main\hot-ops-sync-control.js") {
+            throw "hot-ops-sync-control.js is missing from packaged app.asar"
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wasm-agent-native-sync-win-x64
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            native/windows/release/*.exe
+            native/windows/release/*.json
+            native/windows/release/*.yml

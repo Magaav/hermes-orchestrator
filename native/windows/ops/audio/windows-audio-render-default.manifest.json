@@ -1,0 +1,23 @@
+{
+  "schema": "hermes.wasm_agent.hot_operation_manifest.v1",
+  "name": "set_windows_audio_render_default",
+  "version": "20260811T1850",
+  "entry": "windows-audio-default.js",
+  "operationId": "set_windows_audio_render_default",
+  "requiredNativeCapabilities": ["native.capabilities.hotOps.v1", "native.capabilities.boundedCommand.v1"],
+  "capabilities": [],
+  "timeoutMs": 20000,
+  "inputsSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["instanceId", "expectedName"],
+    "properties": {
+      "instanceId": { "type": "string", "maxLength": 500 },
+      "expectedName": { "type": "string", "maxLength": 240 },
+      "dryRun": { "type": "boolean" }
+    }
+  },
+  "outputsSchema": { "type": "object", "required": ["ok", "changed", "operation", "flow", "failureClassification", "nextAction"] },
+  "safetyLimits": { "network": false, "filesystem": false, "executable": "powershell.exe", "arguments": "one validated render endpoint id and exact expected friendly name", "maxOutputBytes": 65536 },
+  "rollback": { "mode": "rerun-with-prior-endpoint", "scope": "current-user render roles" }
+}

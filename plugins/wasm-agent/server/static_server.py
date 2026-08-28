@@ -6195,7 +6195,7 @@ def direct_head_hermes_dispatch_prompt(action: dict[str, Any], envelope: dict[st
         "refs": direct_envelope_redact(refs),
         "proof": direct_envelope_redact(proof),
         "stream": bool(action.get("stream") or action.get("STREAM")),
-        "route_contract": workspace,
+        "route_contract": master_frontier_dispatch.prompt_workspace_contract(workspace),
     }
     return (
         "Direct-head requested Hermes capability dispatch. Act only within the listed CAPS, "
@@ -14003,35 +14003,14 @@ def create_native_control_command(
 
 def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHandler) -> dict[str, Any]:
     query = parse_qs(urlparse(handler.path).query)
-    device_id = native_device_id_from_value((query.get("device_id") or ["unknown"])[0])
-    build_id = clipped_verbatim(str((query.get("build_id") or [""])[0]), 120)
-    route = clipped_verbatim(str((query.get("route") or [""])[0]), 600)
-    runtime_type = clipped_verbatim(str((query.get("runtime_type") or [handler.headers.get("X-Wasm-Agent-Native-Runtime", "")])[0]), 40)
-    platform = clipped_verbatim(str((query.get("platform") or [""])[0]), 40)
-    app_version = clipped_verbatim(str((query.get("app_version") or [""])[0]), 40)
-    title = clipped_verbatim(str((query.get("title") or [""])[0]), 160)
-    visibility = clipped_verbatim(str((query.get("visibility") or [""])[0]), 20)
-    space_id = clipped_verbatim(str((query.get("space_id") or [""])[0]), 120)
-    space_name = clipped_verbatim(str((query.get("space_name") or [""])[0]), 160)
-    capabilities = clipped_verbatim(str((query.get("capabilities") or [""])[0]), 3000).split(",")
     now = iso_timestamp()
-    heartbeat = {
-        "ok": True,
-        "schema": "hermes.wasm_agent.native_control_heartbeat.v1",
-        "device_id": device_id,
-        "build_id": build_id,
-        "route": route,
-        "runtime_type": runtime_type,
-        "platform": platform,
-        "app_version": app_version,
-        "title": title,
-        "visibility": visibility,
-        "space_id": space_id,
-        "space_name": space_name,
-        "capabilities": capabilities,
-        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
-        "received_at": now,
-    }
+    heartbeat = wasm_agent_live_clients.heartbeat_from_query(
+        query,
+        native_runtime=str(handler.headers.get("X-Wasm-Agent-Native-Runtime", "")),
+        remote_addr=str(handler.client_address[0] if handler.client_address else ""),
+        received_at=now,
+    )
+    device_id = heartbeat["device_id"]
     root = native_control_dir(server)
     write_json_file(root / "heartbeats" / f"{device_id}.json", heartbeat)
     wasm_agent_live_clients.save_client(server.state_dir, heartbeat)
@@ -14064,6 +14043,7 @@ def save_native_control_result(server: WasmAgentServer, body: dict[str, Any], ha
         command["finished_at"] = now
         command["result"] = result["result"]
         write_json_file(command_path, command)
+        wasm_agent_live_clients.apply_command_result_surface(server.state_dir, device_id, command.get("type"), result["result"], received_at=now)
         observability_hub = getattr(server, "observability_hub", None)
         if observability_hub is not None:
             observability_hub.record_command(command, status="finished", result=result["result"])

@@ -28,8 +28,8 @@ Read first: `/local/AGENTS.md`, `/local/README.md`, `docs/context/MAP.md`,
 
 | Evidence | Status | Notes |
 | --- | --- | --- |
-| Local verified installer `WASM-Agent-Setup-x64-0.1.0-20260820T195241Z.exe` | verified | Final NSIS extraction passed. Installer SHA `08b46bf491a25f7652a6765e2e7f17add00998cb488bccf8519880ba75ddbed1`; `app.asar` SHA `9bda2adfbd2fbbcfc71be760ff0553e49884f71594840da01026127e82483dec`. |
-| `native/windows/release/VERIFY.json` | verified | Build `win-x64-20260820T195241Z`; extracted receipt/pointer/full-power and installed-integrity modules, production defaults, and Google client ID are verified. Installed full-power runtime evidence is recorded in `reports/context/latest/master-frontier-full-power-client-runtime.json`. |
+| Local verified installer `WASM-Agent-Setup-x64-0.1.0-20260826T132817Z.exe` | verified package; Windows smoke required | Final NSIS extraction passed. Installer SHA `284cac6c5c5d371b65ee23658c325754a792dc73baed5f9c5aaab9793a1386f5`; `app.asar` SHA `18e7720f7b9ffeeb0ded753ffbbed3e1f2420ea1a16d0580979b9f834303b39c`. Linux ARM64 no-rcedit cross-build still requires installed Windows behavior. |
+| `native/windows/release/VERIFY.json` | verified package | Build `win-x64-20260826T132817Z`; exact companion/startup/dispatcher/UIA/preload parity, lazy authenticated startup, production defaults, Google client ID, and source-test exclusion are verified. Installed proof for this build is absent. |
 | Windows package size audit | implemented-unverified | Re-run after the final NSIS build; `win-unpacked` is not release proof. |
 | Win11 staged update | implemented-unverified | Trigger Go Native / Check Update against the feed, install/restart, then prove the installed shell. |
 | Installed-app login persistence | implemented-unverified | Required Windows host proof absent. |
@@ -77,6 +77,12 @@ Expected proof artifact:
 native/windows/release/VERIFY.json
 ```
 
+The verifier removes its unique installer and app.asar extraction directories
+on success, validation failure, exceptions, SIGINT, and SIGTERM. Durable proof
+stores the installer-relative app.asar identity and SHA-256 rather than a stale
+`/tmp` path. SIGKILL and host loss cannot run process cleanup; the host disk
+health timer removes known verifier directories after the five-minute safety window.
+
 After package verification, prove the Windows release feed points to the same
 verified installer before using Go Native / Check Update:
 
@@ -109,91 +115,103 @@ Required installed evidence:
 Do not claim fixed from source tests, build success, `win-unpacked`, or feed
 presence.
 
-## Native web surfaces
-
-The installed Electron shell exposes `hermes.wasm_agent.native_web_surfaces.v1`
-through `preload.js`. The owning implementation is `src/main/web-surfaces/manager.js`;
-`main.js` contains bootstrap and disposal delegation only. The shared Browser
-widget positions a real Chromium `WebContentsView` over its viewport and uses a
-persistent, surface-isolated session. Remote content is sandboxed, receives no
-Node.js API, accepts HTTPS navigation only, and has downloads and permissions
-denied until a separate explicit grant contract is implemented.
-Each surface strips Electron/product markers from its persistent session user
-agent before constructing the `WebContentsView`, so the renderer and its first
-request share one browser-compatible Chromium identity. Browser Reload bypasses
-the isolated session cache so a compatibility response saved by an older shell
-cannot survive an update.
-
-The source manager also declares `web_surface.input_receipt`. Receipt capture is
-disabled by default. The Browser Agent button explicitly invokes native
-operation `input-receipt` with `{enabled: true|false}`; disabling the mode
-clears its pending gesture, receipt, and expiry timer.
-
-While enabled, Electron's `before-mouse-event` boundary accepts only a matching
-left-button down/up gesture inside the current surface viewport and on the same
-main document. Right/middle, incomplete, navigated, blurred, or out-of-bounds
-input creates no receipt. The result is one redacted
-`hermes.wasm_agent.native_web_surface_input_receipt.v1` object with action
-`pointer.primary_gesture` and outcome `observed_pre_dispatch`. It proves only
-that native Chromium observed the primary gesture before page dispatch; it does
-not prove a click, DOM target, page handler, or page action succeeded.
-
-The manager retains at most `inputReceiptMaxPerSurface: 1`. Every accepted
-gesture replaces the prior receipt and arms a real, overwrite-safe expiry timer
-for `inputReceiptTtlMs: 120000`; an older timer cannot clear a newer receipt.
-Main-frame navigation or renderer loss clears the current receipt, and blur
-clears an unfinished gesture.
-
-Normal surface status omits receipt state. An on-demand request with
-`includeInputReceipt: true` returns `inputReceiptEnabled` plus `inputReceipt` as
-either `null` or the one fresh receipt. The bounded object contains receipt
-identity/time, action/outcome, left button, current-document state, age,
-redaction state, and validated `x`/`y`/viewport values. It contains no selector,
-DOM target, page content, form value, raw Electron event, or other page-derived
-data. Capture and disclosure use no page JavaScript, polling, renderer push, or
-persistence.
-
-Focused source proof:
-
-```bash
-npm --prefix native/windows/src run test:web-surfaces
-node --experimental-vm-modules plugins/wasm-agent/public/modules/client-observability.test.mjs
-node plugins/wasm-agent/tests/browser_widget_native_contract.test.mjs
-```
-
-These tests establish only the manager, explicit Browser Agent control,
-redacted on-demand projection, and Browser wiring source contracts. They do not
-establish packaged or installed runtime behavior. A final NSIS extraction and
-installed-app enable/gesture/receipt proof are still required;
-navigation/login/reopen remains a separate installed-app gate.
-
 ## Full-power Master:frontier authority
 
-The installed Electron client deliberately exposes two unrestricted semantic
-operations to authenticated Master:frontier control:
-
-- `browser_javascript_execute_unrestricted` evaluates arbitrary JavaScript in
-  the selected Browser surface's page main world through the existing native
-  manager. It can inspect and change that page as the embedded browser session.
-- `windows_shell_execute_unrestricted` runs arbitrary PowerShell or CMD under
+The installed Electron client exposes `windows_shell_execute_unrestricted` to
+authenticated Master:frontier control. It runs arbitrary PowerShell or CMD under
   the Windows identity and integrity level already held by the installed app.
   It inherits that user's filesystem, process, network, and credential access;
   it does not silently elevate to Administrator or SYSTEM.
 
-There is intentionally no command or JavaScript allowlist. Authentication,
+There is intentionally no command allowlist. Authentication,
 exact live-client capability selection, command correlation, audit records,
 payload/output ceilings, and execution timeouts remain in force because they
 bound transport and make execution inspectable; they do not limit command
-semantics. Browser authority is confined to the selected native page context.
-Windows shell authority reaches everything available to the installed app's
-Windows user token. These capabilities are not advertised by plain PWA or
-Android clients.
+semantics. Windows shell authority reaches everything available to the installed
+app's Windows user token. It is not advertised by plain PWA or Android clients.
 
-Build `win-x64-20260820T195241Z` passed the final extracted NSIS verifier with
-exact source-matching executor, manager, and manifest bytes. Installed runtime
-then returned command-correlated harmless receipts from arbitrary JavaScript in
-the WhatsApp page main world and PowerShell as Windows user `Victor`; see
-`reports/context/latest/master-frontier-full-power-client-runtime.json`.
+## Companion token and Windows desktop automation
+
+Source now implements an always-on-top transparent companion window owned by
+`src/main/companion-overlay.js`. `Ctrl+Space` toggles the window. Compact mode
+is an 86px transparent native bound containing the exact existing 58px PWA
+avatar token at its existing 14px inset. Opening that token expands the native
+bounds for the exact existing PWA chat panel; there is no native redraw, second
+chat renderer, or second transcript store. The shared cloud PWA owns all visual
+styling, so later avatar/chat polish deploys without rebuilding or reinstalling
+Windows. Native code owns only bounds, always-on-top state, monitor clamping,
+one absolute-cursor drag session, position persistence at drag end, auth
+bootstrap, and the shortcut. Movement preserves the current native size, stale
+updates after release are ignored, and interactive chat-header controls never
+enter the drag path.
+
+Topmost behavior is split at the stable primitive boundary. Electron owns a
+non-focusing `moveTop()` enforcement watchdog and reports its active policy,
+counter, and last-enforcement timestamp. The cloud companion module supplies
+the bounded cadence through preload IPC on every companion boot. This native
+release is required once for the primitive; later cadence tuning remains a
+cloud-module update. UAC secure desktop and higher-integrity windows remain
+outside the current-user Electron authority boundary.
+
+Authenticated Master:frontier client control can request
+`show_companion_overlay`, the bounded `run_notepad_uia_canary` journey, and
+generic `windows_desktop_describe`, `windows_desktop_inspect`,
+`windows_desktop_act`, and `windows_desktop_prove` operations. Inspection
+returns at most 200 UI Automation elements with short-lived 60-second snapshot
+refs. The bounded Control-view walker emits a flat sequence that always includes
+the resolved window root; an empty enumeration is an explicit failure, and each
+receipt reports its element count and per-element conversion-error count instead
+of silently presenting a broken traversal as zero available controls. Explicit
+HWND, process, and title targets resolve fail-closed and never fall back to an
+unrelated foreground window. Actions
+accept only declared UIA patterns and receive completion proof
+only when the requested scalar postcondition is independently reacquired. The
+canary launches Notepad as the installed Windows user, resolves the new PID and
+HWND, finds its editable control through Microsoft UI Automation, writes a
+caller-provided canary, and independently reacquires the UIA root/control before
+accepting the observed postimage. Its receipt includes command correlation,
+PID, HWND, title, bounds, automation identity, input mode, expected/observed
+text, and `independently_verified`.
+
+Desktop authority is deliberately `current_user_token`. The capability report
+states that Administrator/SYSTEM elevation and the UAC secure desktop are not
+supported. If an observed wall eventually requires elevation, implement a
+separate signed broker with its own grant/audit contract; do not silently widen
+the Electron process token.
+
+Fast source loop:
+
+```bash
+HORC_WIN_FAST_PACK=0 HORC_WIN_FAST_TASKS=test:companion-desktop-source horc build win-fast
+```
+
+The final 2026-08-26 source run completed in 3.390 seconds. The final full
+release completed in 112.750 seconds, so normal source feedback is 33.3x faster.
+The two preceding full Windows
+release records took 142.741 and 169.096 seconds, so the focused feedback loop
+is about 42–50x faster. It writes the existing benchmark JSONL and intentionally
+does not create an installer or installed proof.
+
+Status is `installed runtime verified with declared privilege limits`. Build
+`win-x64-20260826T153423Z` carries event-time pointer coordinates and a unique
+drag-session ID across renderer/native IPC, rejects stale sessions, preserves
+the requested companion size, and excludes header controls from drag capture.
+Physical Windows input proved compact and expanded drag, exact same-display
+mouse synchronization, no movement after release even when the cursor was
+immediately moved elsewhere, full-size close/reopen restoration, and working
+Sessions, Settings, and Close buttons. The final installed `app.asar` SHA is
+`531c868ec9698aaaf07cee88282c2ea3943284e8f97af0ff73040dbf84b3df76`;
+see `reports/windows/latest/windows-companion-desktop-runtime.json`.
+
+Build `win-x64-20260826T173047Z` is additionally installed and runtime-verified
+for generic UIA enumeration. Its final extracted `app.asar` SHA is
+`dc48193043aba2b1735d9741a416917954ccd9d5925a4d9c7a1ec1404716c49d`.
+An authenticated production prompt returned 25 foreground WhatsApp controls
+with `element_count: 25`, `enumeration_errors: 11`, process identity, and
+actionable Minimize/Maximize/Close refs. A correlated nonexistent-title probe
+returned `windows_desktop_target_missing` with no window or elements. This
+proves flat enumeration and fail-closed targeting for the installed build; it
+does not replace the separate installed login-persistence proof.
 
 ## Bundled Windows supervisor
 
@@ -217,7 +235,10 @@ replaceable, and invoke NSIS silently with an explicit `/currentuser` or
 the installed build metadata matches the expected build. Installer failure or
 build mismatch records one bounded result and stays stopped instead of reopening
 the old build into another elevation loop. Electron queues one check immediately on startup and
-checks every six hours afterward through `main/automatic-updates.js`.
+checks every six hours afterward through `main/automatic-updates.js`. An
+authenticated native-control update with `applyApproved: true` is treated as
+automatic approval and bypasses the redundant Electron confirmation dialog;
+the supervisor still validates the staged path and SHA before silent activation.
 An all-users install also removes stale current-user Desktop and Start-menu
 shortcuts before recreating the launcher in the all-users scope, preventing an
 older parallel install root from becoming authoritative merely because its
@@ -233,6 +254,18 @@ SHA-256 validation then run against that complete staged file.
 `WASM_AGENT_DISABLE_AUTOMATIC_UPDATES=1` is the recovery opt-out. Electron delegates through `src/main/supervisor-client.js`; direct
 installer launch remains only as a compatibility fallback for apps started
 outside the supervisor.
+
+The supervisor also owns `dispatcher.recover`, independently of Electron. The
+owned `main/dispatcher-health.js` module atomically records only the active
+command ID/type, phase, PID, progress time, and phase deadline. The supervisor
+restarts the Electron child when an active lease remains five seconds beyond
+its declared deadline. Handler deadlines preserve the command-specific native
+budgets; result upload receives a separate 15-second lease. Recovery is bounded
+to two restarts per ten minutes with a 30-second cooldown. Status exposes the
+dispatcher state, last progress/recovery timestamps, command identity, restart
+count, and suppression state; `dispatcher-recovery.json` retains the last
+recovery proof. Authentication state, downloaded hot ops, and the persistent
+CDP profile remain outside the killed child and are not deleted.
 
 The supervisor is a stable native primitive, not a claim that every Windows
 capability is downloadable today. Product workflows should continue moving to
@@ -251,6 +284,22 @@ executable, Electron client module, or installer delegation. Installed proof
 still requires launching from the installed shortcut, observing supervisor
 status and child PID, activating an update, and confirming the expected build
 reconnects.
+
+Start the deterministic reconnect watcher before activating an update so the
+offline/old-build transition and exact new build are captured in one receipt:
+
+```bash
+python3 tools/windows/prove-update-reconnect.py \
+  --expected-build win-x64-YYYYMMDDTHHMMSSZ \
+  --device-id win-desktop-DEVICE \
+  --require-transition
+```
+
+It reads only the authenticated production client registry and writes
+`reports/windows/latest/windows-update-reconnect.json`. A pass requires the
+exact device, production Electron route, expected build ID, and a heartbeat no
+older than 30 seconds. Omitting `--require-transition` verifies current
+installed connectivity but does not prove that an update lifecycle occurred.
 
 ### Slim cloud-only package
 
@@ -327,6 +376,14 @@ after a shell with the downloaded-hot-op sync is installed. Older installed
 shells that only know the downloaded root but do not know how to sync the feed
 will continue to report `hotOpSource=bundled` until updated or given a local
 override inside the Windows process.
+
+CDP action failures are also hot-loaded through this feed. A failed compound
+action reports the zero-based failed step, action, and locator, then performs
+one bounded read-only recovery lens in the same CDP session. Text targets return
+exact-text matches; fill/key failures additionally return visible editable
+controls with flat `actionLocator` values. Master:frontier can therefore retry
+the recovered locator directly instead of spending another generic inspection
+turn. The lens runs only on failure and returns at most 12 matches per class.
 
 The same release feed also publishes the downloaded native runtime under
 `artifacts.runtime.launcher`. Files are served from
@@ -604,6 +661,23 @@ query. It classifies ready, disabled, missing, and non-default loopback capture
 routes without changing Windows settings. Run its production harness promise
 before acoustic browser-transcription tests:
 
+The downloaded hot operation `inspect_windows_open_apps` enumerates at most 64
+visible top-level Windows windows through a fixed `EnumWindows` query. The
+Master:frontier capability `client.windows.desktop.windows.list` projects only
+window title, process name and ID, handle, visibility, minimized state, and a
+truncation flag. Use it for open-app questions; `windows.desktop.inspect`
+remains the separate foreground/exact-window UI Automation tree primitive.
+
+The shared downloaded CDP launcher owns two explicit browser realms.
+`open_windows_cdp_persistent` uses the dedicated durable profile under
+`%APPDATA%/WASM-Agent/browser/cdp-persistent`, preserving Chrome-encrypted
+cookies and authenticated app state across close/reopen.
+`open_windows_cdp_incognito` uses incognito mode plus a unique temporary profile
+removed after exit. Both bind remote debugging to localhost on an OS-assigned
+port and require `/json/version` proof. Master:frontier exposes
+`browser_cdp_default` as an alias of `browser_cdp_persistent`; explicit private,
+incognito, temporary, or disposable intent selects `browser_cdp_incognito`.
+
 ```bash
 python3 tools/windows/prove-audio-loopback.py --origin https://wa.colmeio.com
 ```
@@ -657,6 +731,14 @@ Production packaging excludes old Windows installers, blockmaps, Android APK
 payloads, logs, screenshots, maps, and proof artifacts from the Electron
 resources. Android APKs are resolved from the native release feed and downloaded
 into app data when needed for proof/install flows.
+
+Build `win-x64-20260826T193900Z` is installed and runtime-verified for companion
+topmost enforcement. Its installed `app.asar` SHA exactly matches the final
+extracted NSIS SHA `e8eb52bd874553093442214571272f401e8184fdd0c98db94c99bf0776423cdc`.
+Cloud module release `2b9a3862ae8b9eb957d0a52fd4d839d658c46757b205168dd699b9c091c67c19`
+configured a 750 ms non-focusing policy; native counters advanced, and Win32
+enumeration placed WASM Agent above a deliberately competing topmost window.
+See `reports/windows/latest/windows-companion-topmost-runtime.json`.
 
 ## Durable Next Step
 

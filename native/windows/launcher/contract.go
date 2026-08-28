@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 const supervisorSchema = "hermes.wasm_agent.windows_supervisor.v1"
@@ -19,7 +20,47 @@ var supervisorCapabilities = []string{
 	"process.stop",
 	"process.restart",
 	"process.status",
+	"dispatcher.recover",
 	"update.activate",
+}
+
+const (
+	dispatcherLeaseSchema = "hermes.wasm_agent.windows_dispatcher_lease.v1"
+	recoveryWindow        = 10 * time.Minute
+	recoveryCooldown      = 30 * time.Second
+	maxRecoveryRestarts   = 2
+)
+
+type dispatcherLease struct {
+	Schema      string `json:"schema"`
+	Active      bool   `json:"active"`
+	CommandID   string `json:"commandId"`
+	CommandType string `json:"commandType"`
+	Phase       string `json:"phase"`
+	PID         int    `json:"pid"`
+	UpdatedAt   string `json:"updatedAt"`
+	DeadlineAt  string `json:"deadlineAt"`
+}
+
+func dispatcherLeaseExpired(lease dispatcherLease, now time.Time) bool {
+	if lease.Schema != dispatcherLeaseSchema || !lease.Active || lease.CommandID == "" {
+		return false
+	}
+	deadline, err := time.Parse(time.RFC3339, lease.DeadlineAt)
+	return err == nil && now.After(deadline.Add(5*time.Second))
+}
+
+func recoveryAllowed(restarts []time.Time, last time.Time, now time.Time) bool {
+	if !last.IsZero() && now.Sub(last) < recoveryCooldown {
+		return false
+	}
+	count := 0
+	for _, restart := range restarts {
+		if now.Sub(restart) <= recoveryWindow {
+			count++
+		}
+	}
+	return count < maxRecoveryRestarts
 }
 
 type commandPayload struct {

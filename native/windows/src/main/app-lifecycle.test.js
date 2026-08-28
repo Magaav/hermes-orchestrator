@@ -22,7 +22,6 @@ function fixture() {
   installAppLifecycle({
     app,
     processRef,
-    webSurfaces: { disposeAll: () => calls.push("dispose") },
     flushAuthCookies: ({ reason }) => calls.push(`flush:${reason}`),
     fatalLogPath: path.join(root, "fatal.log"),
     recoveryStatePath: path.join(root, "recovery.json"),
@@ -46,7 +45,7 @@ function fixture() {
   const f = fixture();
   f.app.emit("before-quit");
   f.app.emit("window-all-closed");
-  assert.deepStrictEqual(f.calls, ["dispose", "flush:before_quit", "quit"]);
+  assert.deepStrictEqual(f.calls, ["flush:before_quit", "quit"]);
 }
 
 {

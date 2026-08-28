@@ -1,0 +1,14 @@
+{
+  "schema": "hermes.wasm_agent.hot_operation_manifest.v1",
+  "name": "probe_windows_audio_signal",
+  "version": "20260811T1915",
+  "entry": "windows-audio-signal-probe.js",
+  "operationId": "probe_windows_audio_signal",
+  "requiredNativeCapabilities": ["native.capabilities.hotOps.v1", "native.capabilities.boundedCommand.v1"],
+  "capabilities": [],
+  "timeoutMs": 22000,
+  "inputsSchema": {"type":"object","properties":{"phrase":{"type":"string","maxLength":240},"voice":{"type":"string","maxLength":120},"captureMs":{"type":"number","minimum":2000,"maximum":12000}},"additionalProperties":false},
+  "outputsSchema": {"type":"object","required":["ok","operation","signalPresent","peak","rms","failureClassification","nextAction"]},
+  "safetyLimits": {"network":false,"filesystem":false,"executable":"powershell.exe","arguments":"fixed WinMM capture plus bounded System.Speech stimulus","maxOutputBytes":65536},
+  "rollback": {"mode":"noop"}
+}
