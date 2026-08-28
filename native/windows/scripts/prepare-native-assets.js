@@ -2,8 +2,8 @@
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { spawnSync } = require("node:child_process");
 const { buildWindowsLauncher } = require("./build-windows-launcher");
+const { buildWindowsUninstaller } = require("./build-windows-uninstaller");
 
 const windowsRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(windowsRoot, "..", "..");
@@ -16,7 +16,6 @@ const nativeDefaults = path.join(buildRoot, "native-defaults.json");
 const nativeDefaultsApp = path.join(srcRoot, "native-defaults.json");
 const nativeUninstaller = path.join(buildRoot, "wasm-agent-uninstaller.exe");
 const nativeLauncher = path.join(buildRoot, "wasm-agent-launcher.exe");
-const nativeUninstallerScript = path.join(buildRoot, "uninstaller.nsi");
 const hostNsisRoot = path.join(buildRoot, "nsis-host");
 const packageJsonPath = path.join(srcRoot, "package.json");
 const staticServerPath = path.join(repoRoot, "plugins", "wasm-agent", "server", "static_server.py");
@@ -151,13 +150,7 @@ function prepareHostNsisShim() {
 }
 
 function prepareUninstaller() {
-  const systemMakensis = "/usr/bin/makensis";
-  if (process.platform !== "linux" || !fs.existsSync(systemMakensis) || !fs.existsSync(nativeUninstallerScript)) return;
-  const result = spawnSync(systemMakensis, [`-DOUT_FILE=${nativeUninstaller}`, nativeUninstallerScript], {
-    cwd: buildRoot,
-    stdio: "inherit",
-  });
-  if (result.status !== 0) throw new Error(`makensis failed while building ${nativeUninstaller}`);
+  buildWindowsUninstaller(nativeUninstaller);
 }
 
 function prepareLauncher() {
