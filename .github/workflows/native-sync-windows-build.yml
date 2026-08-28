@@ -35,6 +35,7 @@ jobs:
         working-directory: native/windows/src
         env:
           WASM_AGENT_DEFAULT_SERVER_URL: https://wa.colmeio.com
+          HERMES_WASM_AGENT_GOOGLE_CLIENT_ID: ${{ secrets.WASM_AGENT_GOOGLE_CLIENT_ID }}
         run: npm run build:win:x64
 
       - name: Prove sync owner is packaged in app.asar
