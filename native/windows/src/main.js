@@ -43,7 +43,7 @@ const { createWindowsNativeCommands } = require("./main/windows-native-commands"
 const { createDispatcherHealth } = require("./main/dispatcher-health");
 const { createHotOpsSyncControl } = require("./main/hot-ops-sync-control");
 const { compactSyncResult, projectHotOpsCatalog } = require("./main/hot-ops-catalog");
-const { compactHeartbeat, createBridgeStatus } = require("./main/bridge-status-projection");
+const { compactHeartbeat, createBridgeStatus, createKernelStatus, createRuntimeSyncStatus } = require("./main/bridge-status-projection");
 const windowsNativeCommands = createWindowsNativeCommands({ companion: () => companionOverlay, desktop: { operations: WINDOWS_DESKTOP_OPERATIONS, control: createWindowsDesktopControl() } });
 const { clearWebShellCache } = require("./main/web-shell-session");
 const { ALL_NATIVE_KERNEL_CAPABILITIES, BRIDGE_PROTOCOL_CAPABILITIES, WINDOWS_NATIVE_KERNEL_CAPABILITIES } = require("./main/native-capabilities");
@@ -4093,12 +4093,11 @@ async function handleWindowsNativeDiagnosticsOperation(event, operation) {
   }
   if (opName === "get_native_kernel_status") {
     await ensureDownloadedRuntimeFromFeed(payload);
-    await ensureDownloadedHotOperationsFromFeed(payload);
-    return { ok: true, operation: opName, kernel: nativeKernelStatus(), logsTail: recentBridgeLogsTail() };
+    return createKernelStatus(nativeKernelStatus(), recentBridgeLogsTail(), payload);
   }
   if (opName === "refresh_downloaded_runtime" || opName === "sync_downloaded_runtime") {
     const downloadedRuntimeSync = await ensureDownloadedRuntimeFromFeed({ ...payload, forceSync: true });
-    return { ok: downloadedRuntimeSync.ok === true, operation: opName, downloadedRuntimeSync, downloadedRuntime: downloadedRuntimeSummary(), logsTail: recentBridgeLogsTail() };
+    return createRuntimeSyncStatus(opName, downloadedRuntimeSync, downloadedRuntimeSummary(), recentBridgeLogsTail(), payload);
   }
   if (opName === "rollback_downloaded_runtime") {
     const result = rollbackDownloadedRuntimeToLastKnownGood();
@@ -5682,8 +5681,7 @@ async function executeNativeControlCommand(command = {}) {
   }
   if (type === "get_native_kernel_status") {
     await ensureDownloadedRuntimeFromFeed(payload);
-    await ensureDownloadedHotOperationsFromFeed(payload);
-    const result = { ok: true, operation: type, kernel: nativeKernelStatus(), logsTail: recentBridgeLogsTail() };
+    const result = createKernelStatus(nativeKernelStatus(), recentBridgeLogsTail(), payload);
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
@@ -5696,7 +5694,7 @@ async function executeNativeControlCommand(command = {}) {
   }
   if (type === "refresh_downloaded_runtime" || type === "sync_downloaded_runtime") {
     const downloadedRuntimeSync = await ensureDownloadedRuntimeFromFeed({ ...payload, forceSync: true });
-    const result = { ok: downloadedRuntimeSync.ok === true, operation: type, downloadedRuntimeSync, downloadedRuntime: downloadedRuntimeSummary(), logsTail: recentBridgeLogsTail() };
+    const result = createRuntimeSyncStatus(type, downloadedRuntimeSync, downloadedRuntimeSummary(), recentBridgeLogsTail(), payload);
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
@@ -6086,7 +6084,7 @@ function loadConfiguredServer(win) {
     console.log(`[native] final loaded URL: ${startUrl || fallbackPagePath()}`);
     if (serverUrl) {
       void ensureDownloadedRuntimeFromFeed({ launch: true, forceSync: true })
-        .then((downloadedRuntimeSync) => postNativeEvent("native.runtime_sync", { downloadedRuntimeSync, downloadedRuntime: downloadedRuntimeSummary(), kernel: nativeKernelStatus() }))
+        .then((downloadedRuntimeSync) => postNativeEvent("native.runtime_sync", createRuntimeSyncStatus("native.runtime_sync", downloadedRuntimeSync, downloadedRuntimeSummary())))
         .catch((error) => logNativeDiagnostic("downloaded-runtime-sync-failed", { reason: String(error && error.message ? error.message : error) }));
       void ensureDownloadedHotOperationsFromFeed({ launch: true, forceSync: true })
         .then((downloadedHotOpsSync) => postNativeEvent("native.hot_ops_sync", { downloadedHotOpsSync, hotOperations: hotOperationsSummary(), kernel: nativeKernelStatus() }))

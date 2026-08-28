@@ -519,6 +519,10 @@ excluded by default; request at most 20 recent entries with `{"includeLogs":true
 hot-op summaries by default. Pull full nested diagnostics with
 `{"includeDetails":true}` or at most 20 audit entries with
 `{"includeLogs":true}`; heartbeat events never carry raw audit lines.
+`get_native_kernel_status`, `sync_downloaded_runtime`, and
+`refresh_downloaded_runtime` use the same defaults: compact active identities,
+capabilities, sync/stale state, and file counts. Full histories require
+`{"includeDetails":true}` and logs remain separately opt-in.
 Shells with
 the refresh capability also accept `refresh_downloaded_hot_ops` or
 `sync_downloaded_hot_ops`, which force the same sync and report

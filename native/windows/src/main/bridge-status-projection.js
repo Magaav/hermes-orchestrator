@@ -34,4 +34,20 @@ function compactHeartbeat(fields = {}) {
   return output;
 }
 
-module.exports = { MAX_LOGS, SCHEMA, compactDownloadedRuntime, compactHeartbeat, compactHotOperations, compactKernel, createBridgeStatus };
+function compactRuntimeSync(sync = {}) {
+  return { ok: sync.ok === true, changed: sync.changed === true, attemptedAt: String(sync.attemptedAt || ""), syncedAt: String(sync.syncedAt || ""), feedBundleId: String(sync.feedBundleId || ""), cachedBundleId: String(sync.cachedBundleId || ""), activeRuntimeId: String(sync.activeRuntimeId || ""), activeRuntimeSha: String(sync.activeRuntimeSha || ""), syncStatus: String(sync.status || sync.syncStatus || ""), staleReason: String(sync.staleReason || ""), fallbackReason: String(sync.fallbackReason || ""), error: String(sync.error || ""), fileCount: Array.isArray(sync.files) ? sync.files.length : 0 };
+}
+
+function createKernelStatus(kernel = {}, logs = [], options = {}) {
+  const includeDetails = requested(options, "includeDetails", "include_details");
+  const includeLogs = requested(options, "includeLogs", "include_logs");
+  return { schema: SCHEMA, ok: true, operation: "get_native_kernel_status", kernel: includeDetails ? kernel : compactKernel(kernel), logsTail: includeLogs ? logs.slice(-MAX_LOGS) : [], logCount: logs.length, detailAvailable: true, failureClassification: null };
+}
+
+function createRuntimeSyncStatus(operation, sync = {}, runtime = {}, logs = [], options = {}) {
+  const includeDetails = requested(options, "includeDetails", "include_details");
+  const includeLogs = requested(options, "includeLogs", "include_logs");
+  return { schema: SCHEMA, ok: sync.ok === true, operation: String(operation || "sync_downloaded_runtime"), downloadedRuntimeSync: includeDetails ? sync : compactRuntimeSync(sync), downloadedRuntime: includeDetails ? runtime : compactDownloadedRuntime(runtime), logsTail: includeLogs ? logs.slice(-MAX_LOGS) : [], logCount: logs.length, detailAvailable: true, failureClassification: sync.ok === true ? null : String(sync.failureClassification || sync.error || "runtime_download_failed") };
+}
+
+module.exports = { MAX_LOGS, SCHEMA, compactDownloadedRuntime, compactHeartbeat, compactHotOperations, compactKernel, compactRuntimeSync, createBridgeStatus, createKernelStatus, createRuntimeSyncStatus };
