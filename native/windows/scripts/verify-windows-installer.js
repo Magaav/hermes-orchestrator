@@ -45,7 +45,7 @@ function sha256(filePath) {
 }
 
 function sevenZipPath() {
-  const platform = process.platform === "darwin" ? "mac" : process.platform;
+  const platform = { darwin: "mac", win32: "win" }[process.platform] || process.platform;
   const arch = { x64: "x64", arm64: "arm64", ia32: "ia32", arm: "arm" }[process.arch] || process.arch;
   const exe = process.platform === "win32" ? "7za.exe" : "7za";
   const candidate = path.join(srcRoot, "node_modules", "7zip-bin", platform, arch, exe);
