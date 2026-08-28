@@ -6,7 +6,7 @@ const { spawnSync } = require("node:child_process");
 const windowsRoot = path.resolve(__dirname, "..");
 const srcRoot = path.join(windowsRoot, "src");
 const buildRoot = path.join(srcRoot, "build");
-const defaultOutput = path.join(buildRoot, "wasm-agent-uninstaller.exe");
+const defaultOutput = path.join(srcRoot, "generated", "wasm-agent-uninstaller.exe");
 const uninstallerScript = path.join(buildRoot, "uninstaller.nsi");
 
 function resolveMakensis(platform = process.platform) {
@@ -24,6 +24,7 @@ function buildWindowsUninstaller(outputPath = defaultOutput) {
     if (process.platform === "darwin") return "";
     throw new Error(`makensis is unavailable on ${process.platform}`);
   }
+  fs.mkdirSync(path.dirname(outputPath), { recursive: true });
   const result = spawnSync(makensis, [`-DOUT_FILE=${outputPath}`, uninstallerScript], {
     cwd: buildRoot,
     stdio: "inherit",
