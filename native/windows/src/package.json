@@ -12,7 +12,7 @@
     "test:native-policy": "node native-shell-policy.test.js",
     "test:companion-overlay": "node main/companion-overlay.test.js && node main/companion-startup.test.js && node main/windows-native-commands.test.js && node main/windows-desktop-control.test.js && node main/windows-desktop/uia-control.test.js",
     "test:companion-desktop-source": "npm run test:companion-overlay && node --check main.js && node --check preload.js && node --check ../scripts/verify-windows-installer.js && node ../../../plugins/wasm-agent/public/modules/assistant/companion-window.test.mjs && python3 ../../../plugins/wasm-agent/tests/live_clients.test.py && python3 ../../../plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py && python3 ../../../plugins/wasm-agent/tests/master_frontier_v6_controller.test.py && python3 ../../../plugins/wasm-agent/tests/master_frontier_route_contracts.test.py",
-    "test:windows-supervisor": "node main/dispatcher-health.test.js && node main/hot-ops-sync-control.test.js && node main/supervisor-client.test.js && cd ../launcher && go test ./... && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 go build -o ../src/build/wasm-agent-launcher.exe .",
+    "test:windows-supervisor": "node main/dispatcher-health.test.js && node main/hot-ops-sync-control.test.js && node main/supervisor-client.test.js && cd ../launcher && go test ./... && cd ../src && node ../scripts/build-windows-launcher.js",
     "test:windows-self-update": "node windows-self-update.test.js",
     "test:windows-update-feed": "node windows-self-update.test.js",
     "test:app-lifecycle": "node main/app-lifecycle.test.js",

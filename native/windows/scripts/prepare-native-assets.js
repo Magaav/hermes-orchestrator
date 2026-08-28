@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
+const { buildWindowsLauncher } = require("./build-windows-launcher");
 
 const windowsRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(windowsRoot, "..", "..");
@@ -15,7 +16,6 @@ const nativeDefaults = path.join(buildRoot, "native-defaults.json");
 const nativeDefaultsApp = path.join(srcRoot, "native-defaults.json");
 const nativeUninstaller = path.join(buildRoot, "wasm-agent-uninstaller.exe");
 const nativeLauncher = path.join(buildRoot, "wasm-agent-launcher.exe");
-const nativeLauncherRoot = path.join(windowsRoot, "launcher");
 const nativeUninstallerScript = path.join(buildRoot, "uninstaller.nsi");
 const hostNsisRoot = path.join(buildRoot, "nsis-host");
 const packageJsonPath = path.join(srcRoot, "package.json");
@@ -161,13 +161,7 @@ function prepareUninstaller() {
 }
 
 function prepareLauncher() {
-  const env = { ...process.env, GOOS: "windows", GOARCH: "amd64", CGO_ENABLED: "0" };
-  const result = spawnSync("go", ["build", "-trimpath", "-ldflags", "-s -w", "-o", nativeLauncher, "."], {
-    cwd: nativeLauncherRoot,
-    env,
-    stdio: "inherit",
-  });
-  if (result.status !== 0) throw new Error(`go build failed while building ${nativeLauncher}`);
+  buildWindowsLauncher(nativeLauncher);
 }
 
 function main() {
