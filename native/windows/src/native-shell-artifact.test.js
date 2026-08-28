@@ -20,6 +20,7 @@ for (const artifact of artifacts) {
   assert(files.includes("/main/companion-overlay.js"), `${artifact} must include the companion overlay owner`);
   assert(files.includes("/main/windows-desktop-control.js"), `${artifact} must include the Windows desktop control owner`);
   assert(files.includes("/main/hot-ops-catalog.js"), `${artifact} must include the bounded hot-op catalog owner`);
+  assert(files.includes("/main/bridge-status-projection.js"), `${artifact} must include the bounded bridge status owner`);
 
   const mainJs = asar.extractFile(artifact, "main.js").toString("utf8");
   const preloadJs = asar.extractFile(artifact, "preload.js").toString("utf8");

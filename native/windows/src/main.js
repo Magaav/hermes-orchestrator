@@ -43,6 +43,7 @@ const { createWindowsNativeCommands } = require("./main/windows-native-commands"
 const { createDispatcherHealth } = require("./main/dispatcher-health");
 const { createHotOpsSyncControl } = require("./main/hot-ops-sync-control");
 const { compactSyncResult, projectHotOpsCatalog } = require("./main/hot-ops-catalog");
+const { compactHeartbeat, createBridgeStatus } = require("./main/bridge-status-projection");
 const windowsNativeCommands = createWindowsNativeCommands({ companion: () => companionOverlay, desktop: { operations: WINDOWS_DESKTOP_OPERATIONS, control: createWindowsDesktopControl() } });
 const { clearWebShellCache } = require("./main/web-shell-session");
 const { ALL_NATIVE_KERNEL_CAPABILITIES, BRIDGE_PROTOCOL_CAPABILITIES, WINDOWS_NATIVE_KERNEL_CAPABILITIES } = require("./main/native-capabilities");
@@ -1810,13 +1811,10 @@ function listHotOperations() {
 }
 
 function getBridgeStatus() {
+  const options = arguments[0] || {};
   const hotOps = hotOperationsSummary();
   const kernel = nativeKernelStatus();
-  return {
-    ok: true,
-    stable: true,
-    operation: "get_bridge_status",
-    source: "shell",
+  return createBridgeStatus({
     shellProtocolVersion: SHELL_PROTOCOL_VERSION,
     hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION,
     minimumRunnerVersion: MINIMUM_RUNNER_VERSION,
@@ -1827,19 +1825,11 @@ function getBridgeStatus() {
     arch: os.arch(),
     platform: process.platform,
     kernel,
-    nativeKernel: kernel,
     downloadedRuntime: kernel.downloadedRuntime,
-    activeDownloadedRuntimeId: kernel.activeDownloadedRuntimeId,
-    activeDownloadedRuntimeSha: kernel.activeDownloadedRuntimeSha,
-    activeHotOpBundleId: kernel.activeHotOpBundleId,
-    activeHotOpSha: kernel.activeHotOpSha,
-    syncStatus: kernel.syncStatus,
-    staleReason: kernel.staleReason,
     hotOperations: hotOps,
-    logsTail: recentBridgeLogsTail(),
-    failureClassification: null,
-    nextAction: "Run list_hot_operations, run_shell_self_test, then canary_echo.",
-  };
+    logsTail: options.includeLogs === true || options.include_logs === true ? recentBridgeLogsTail() : [],
+    logCount: bridgeLogsTail.length,
+  }, options);
 }
 
 function androidSimulatorStateRoot() {
@@ -5700,7 +5690,7 @@ async function executeNativeControlCommand(command = {}) {
   if (type === "get_bridge_status" || type === "status") {
     await ensureDownloadedRuntimeFromFeed(payload);
     await ensureDownloadedHotOperationsFromFeed(payload);
-    const result = getBridgeStatus();
+    const result = getBridgeStatus(payload);
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
@@ -6501,13 +6491,13 @@ app.whenReady().then(async () => {
 	    nativeKernel: kernelStatus,
 	    hotOperations: hotOpsStatus,
 	  });
-  void postNativeEvent("device.status", { status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, downloadedRuntimeProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION, nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES, downloadedRuntime: runtimeStatus, nativeKernel: kernelStatus, activeDownloadedRuntimeId: kernelStatus.activeDownloadedRuntimeId, activeDownloadedRuntimeSha: kernelStatus.activeDownloadedRuntimeSha, activeHotOpBundleId: kernelStatus.activeHotOpBundleId, activeHotOpSha: kernelStatus.activeHotOpSha, syncStatus: kernelStatus.syncStatus, staleReason: kernelStatus.staleReason, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...hotOpsStatus }, logsTail: recentBridgeLogsTail() });
+  void postNativeEvent("device.status", compactHeartbeat({ status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, downloadedRuntimeProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION, nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES, downloadedRuntime: runtimeStatus, nativeKernel: kernelStatus, activeDownloadedRuntimeId: kernelStatus.activeDownloadedRuntimeId, activeDownloadedRuntimeSha: kernelStatus.activeDownloadedRuntimeSha, activeHotOpBundleId: kernelStatus.activeHotOpBundleId, activeHotOpSha: kernelStatus.activeHotOpSha, syncStatus: kernelStatus.syncStatus, staleReason: kernelStatus.staleReason, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...hotOpsStatus }, logCount: bridgeLogsTail.length }));
   startNativeControlPolling();
   setInterval(() => {
     void ensureDownloadedRuntimeFromFeed({ heartbeat: true });
     const heartbeatHotOps = hotOperationsSummary();
     const heartbeatKernel = nativeKernelStatus();
-    void postNativeEvent("device.heartbeat", { status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, downloadedRuntimeProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION, nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES, downloadedRuntime: heartbeatKernel.downloadedRuntime, nativeKernel: heartbeatKernel, activeDownloadedRuntimeId: heartbeatKernel.activeDownloadedRuntimeId, activeDownloadedRuntimeSha: heartbeatKernel.activeDownloadedRuntimeSha, activeHotOpBundleId: heartbeatKernel.activeHotOpBundleId, activeHotOpSha: heartbeatKernel.activeHotOpSha, syncStatus: heartbeatKernel.syncStatus, staleReason: heartbeatKernel.staleReason, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...heartbeatHotOps }, hotOpsMode: heartbeatHotOps.hotOpsMode, hotOpsRoot: heartbeatHotOps.hotOpsRoot, devReload: heartbeatHotOps.devReload, logsTail: recentBridgeLogsTail() });
+    void postNativeEvent("device.heartbeat", compactHeartbeat({ status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, downloadedRuntimeProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION, nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES, downloadedRuntime: heartbeatKernel.downloadedRuntime, nativeKernel: heartbeatKernel, activeDownloadedRuntimeId: heartbeatKernel.activeDownloadedRuntimeId, activeDownloadedRuntimeSha: heartbeatKernel.activeDownloadedRuntimeSha, activeHotOpBundleId: heartbeatKernel.activeHotOpBundleId, activeHotOpSha: heartbeatKernel.activeHotOpSha, syncStatus: heartbeatKernel.syncStatus, staleReason: heartbeatKernel.staleReason, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...heartbeatHotOps }, hotOpsMode: heartbeatHotOps.hotOpsMode, hotOpsRoot: heartbeatHotOps.hotOpsRoot, devReload: heartbeatHotOps.devReload, logCount: bridgeLogsTail.length }));
   }, HEARTBEAT_INTERVAL_MS).unref();
   app.on("activate", () => {
     void companionStartup?.sync("app-activate");

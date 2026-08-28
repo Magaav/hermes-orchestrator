@@ -56,6 +56,7 @@
     "main/dispatcher-health.js",
     "main/hot-ops-sync-control.js",
     "main/hot-ops-catalog.js",
+    "main/bridge-status-projection.js",
     "main/observability-kernel.js",
     "main/audio-stimulus.js",
     "main/automatic-updates.js",

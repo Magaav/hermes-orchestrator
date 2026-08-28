@@ -515,6 +515,10 @@ Request one operation's full manifest contract on demand with
 `{"operationName":"<exact-name>"}`. Broad detail requests without an exact
 operation fail with `hot_operation_reference_required`. Raw bridge logs are
 excluded by default; request at most 20 recent entries with `{"includeLogs":true}`.
+`get_bridge_status` and device heartbeats expose compact kernel, runtime, and
+hot-op summaries by default. Pull full nested diagnostics with
+`{"includeDetails":true}` or at most 20 audit entries with
+`{"includeLogs":true}`; heartbeat events never carry raw audit lines.
 Shells with
 the refresh capability also accept `refresh_downloaded_hot_ops` or
 `sync_downloaded_hot_ops`, which force the same sync and report
