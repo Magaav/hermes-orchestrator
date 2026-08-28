@@ -7,7 +7,7 @@ Var oldMenuDirectory
 
 !if "${UNINSTALLER_OUT_FILE}" == ""
   !undef UNINSTALLER_OUT_FILE
-  !define UNINSTALLER_OUT_FILE "${PROJECT_DIR}/generated/wasm-agent-uninstaller.exe"
+  !define UNINSTALLER_OUT_FILE "${PROJECT_DIR}\generated\wasm-agent-uninstaller.exe"
 !endif
 
 !include "common.nsh"
