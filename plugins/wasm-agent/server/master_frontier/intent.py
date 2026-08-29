@@ -19,11 +19,11 @@ SOURCE_QUESTION_RE = re.compile(
     re.IGNORECASE,
 )
 LIVE_TARGET_RE = re.compile(
-    r"\b(?:browser|page|screen|runtime|application|app|ui)\b",
+    r"\b(?:browser|page|screen|desktop|windows|runtime|application|app|control|ui)\b",
     re.IGNORECASE,
 )
 CURRENT_STATE_RE = re.compile(
-    r"\b(?:currently\s+open|current(?:ly)?\s+(?:visible|active|open)|live|right\s+now)\b",
+    r"\b(?:currently\s+(?:available|open)|current(?:ly)?\s+(?:available|visible|active|open)|live|right\s+now)\b",
     re.IGNORECASE,
 )
 LIVE_OBSERVATION_RE = re.compile(
@@ -39,13 +39,23 @@ CLIENT_ACTION_DIRECTIVE_RE = re.compile(
     r"^\s*(?:(?:can|could|would)\s+you\s+|please\s+)?(?:click|close|focus|hide|maximize|minimize|navigate|open|post|reload|select|send|show|type|write)\b",
     re.IGNORECASE,
 )
+NEGATED_CLIENT_ACTION_CLAUSE_RE = re.compile(
+    r"\b(?:do\s+not|don't|never|without)\b[^.!?;]*(?:[.!?;]|$)",
+    re.IGNORECASE,
+)
 CLIENT_SURFACE_RE = re.compile(
-    r"\b(?:browser|client|panel|space|tab|widget|window)\w*\b",
+    r"\b(?:application|app|browser|client|control|desktop|panel|space|tab|widget|window)\w*\b",
     re.IGNORECASE,
 )
 CLIENT_STATE_QUERY_RE = re.compile(
     r"\b(?:is|are)\b.{0,80}\b(?:active|closed|focused|hidden|open|opened|running|shown|visible)\b|"
-    r"\b(?:active|open|opened|visible)\b.{0,40}\?\s*$",
+    r"\b(?:active|open|opened|visible)\b.{0,40}\?\s*$|"
+    r"\b(?:inspect|identify|tell\s+me|what|which)\b.{0,100}\bcurrently\s+available\b",
+    re.IGNORECASE,
+)
+SELF_REFLECTION_RE = re.compile(
+    r"\b(?:crit\w*|review|assess|evaluate|reflect)\b.{0,80}\b(?:yourself|your\s+(?:answer|behavior|performance|reasoning)|this\s+response)\b|"
+    r"\b(?:yourself|your\s+(?:answer|behavior|performance|reasoning)|this\s+response)\b.{0,80}\b(?:crit\w*|review|assess|evaluate|reflect)\b",
     re.IGNORECASE,
 )
 
@@ -135,7 +145,7 @@ def objective_is_declared_client_action(envelope: dict[str, Any]) -> bool:
     route_contract = envelope.get("route_contract") if isinstance(envelope.get("route_contract"), dict) else {}
     client_ui = route_contract.get("client_ui") if isinstance(route_contract.get("client_ui"), dict) else {}
     operations = client_ui.get("operations") if isinstance(client_ui.get("operations"), list) else []
-    objective = str(envelope.get("objective") or "")
+    objective = NEGATED_CLIENT_ACTION_CLAUSE_RE.sub(" ", str(envelope.get("objective") or ""))
     return bool(
         operations
         and (CLIENT_ACTION_RE.search(objective) or CLIENT_STATE_QUERY_RE.search(objective))
@@ -148,6 +158,11 @@ def objective_is_declared_client_state_query(envelope: dict[str, Any]) -> bool:
     route_contract = envelope.get("route_contract") if isinstance(envelope.get("route_contract"), dict) else {}
     client_ui = route_contract.get("client_ui") if isinstance(route_contract.get("client_ui"), dict) else {}
     return bool(client_ui.get("operations") and CLIENT_SURFACE_RE.search(str(envelope.get("objective") or "")) and CLIENT_STATE_QUERY_RE.search(str(envelope.get("objective") or "")))
+
+
+def objective_is_self_reflection(envelope: dict[str, Any]) -> bool:
+    """Recognize critique whose evidence is the conversation, not source or runtime state."""
+    return bool(SELF_REFLECTION_RE.search(str(envelope.get("objective") or "")))
 
 
 def objective_is_implementation_intent(envelope: dict[str, Any]) -> bool:

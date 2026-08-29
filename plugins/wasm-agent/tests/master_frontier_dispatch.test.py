@@ -31,6 +31,25 @@ class MasterFrontierDispatchTests(unittest.TestCase):
 
         self.assertEqual(dispatch.escalation_reason(action), "provider api key is not configured")
 
+    def test_prompt_workspace_contract_drops_non_authority_context(self) -> None:
+        projected = dispatch.prompt_workspace_contract({
+            "route_id": "wasm-agent.avatar-chat.ui",
+            "workspace_root": "/local/plugins/wasm-agent",
+            "allowed_read_roots": ["/local/plugins/wasm-agent"],
+            "allowed_write_roots": ["/local/plugins/wasm-agent"],
+            "caps": ["repo.read", "repo.edit"],
+            "client_ui": {"widget_ids": ["browser"]},
+            "source_index": {"include_roots": ["server", "public", "tests"]},
+            "checks": [{"id": "full-suite"}],
+        })
+
+        self.assertEqual(projected["route_id"], "wasm-agent.avatar-chat.ui")
+        self.assertEqual(projected["allowed_read_roots"], ["/local/plugins/wasm-agent"])
+        self.assertNotIn("client_ui", projected)
+        self.assertNotIn("source_index", projected)
+        self.assertNotIn("checks", projected)
+        self.assertNotIn("caps", projected)
+
     def test_runtime_entity_dispatch_ignores_repo_edit_implementation(self) -> None:
         envelope = {"objective": "Go ahead and build the MCP files", "capabilities": ["repo.edit", "test.run"]}
 

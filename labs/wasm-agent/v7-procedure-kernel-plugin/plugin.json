@@ -1,0 +1,24 @@
+{
+  "schema": "wasm-agent.kernel-plugin.v1",
+  "id": "mf-v7.procedure-memory.pilot",
+  "version": "0.1.0-pilot",
+  "status": "structured-proof-only-semantic-router-pruned",
+  "entry": "procedure_kernel.py",
+  "owns": [
+    "proof-complete trajectory compilation",
+    "scoped procedure storage",
+    "compact procedure map",
+    "procedure matching and invalidation",
+    "fresh-proof execution"
+  ],
+  "doesNotOwn": [
+    "natural-language intent classification",
+    "production routing",
+    "native capability execution",
+    "MF-v6 state"
+  ],
+  "hotLoad": true,
+  "fallback": "MF-v6",
+  "promotionGate": "blocked: local router failed held-out coverage; GLM label and typed-compiler candidates made unsafe routes; see SEMANTIC_ROUTER_PRUNE.md",
+  "pruneGate": "benchmark-result.json:decision=prune-pilot"
+}

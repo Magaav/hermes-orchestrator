@@ -1,0 +1,27 @@
+{
+  "schema": "hermes.wasm_agent.hot_operation_manifest.v1",
+  "name": "inspect_windows_open_apps",
+  "version": "20260826T2145",
+  "entry": "windows-open-apps.js",
+  "operationId": "inspect_windows_open_apps",
+  "requiredNativeCapabilities": [
+    "native.capabilities.hotOps.v1",
+    "native.capabilities.boundedCommand.v1"
+  ],
+  "capabilities": [],
+  "timeoutMs": 15000,
+  "inputsSchema": { "type": "object", "additionalProperties": false },
+  "outputsSchema": {
+    "type": "object",
+    "required": ["ok", "operation", "windowCount", "windows", "truncated", "proof"]
+  },
+  "safetyLimits": {
+    "network": false,
+    "filesystem": false,
+    "executable": "powershell.exe",
+    "arguments": "fixed visible top-level window inventory only",
+    "maxWindows": 64,
+    "maxOutputBytes": 65536
+  },
+  "rollback": { "mode": "noop" }
+}

@@ -106,6 +106,38 @@ Each promise must declare:
 Promises should be atomic, idempotent when practical, non-destructive by
 default, and small enough that a failure explains the next move.
 
+## Claim-Risk-Proof Gate
+
+Production-critical claims use the machine-readable matrix in
+`docs/context/CLAIM_RISK_PROOF_MATRIX.json`. Each entry binds one claim to an
+owner, risk tolerance, controls, required independent evidence classes,
+freshness, numeric acceptance thresholds, and invalidation paths. The gate
+fails closed: absent measurements are not defaulted, stale or malformed
+evidence is rejected, and efficiency cannot override an acceptance threshold.
+
+Run the deterministic end-to-end campaign with:
+
+```bash
+python3 tools/context/prove-claim-risk-proof.py --self-test
+```
+
+The campaign must accept the complete reference receipt and reject injected
+stale evidence, a missing evidence class, a threshold regression, and an
+artifact digest mismatch. This proves the gate behavior, not product readiness
+or a live production deployment.
+
+The first real product projection is the Android voice claim:
+
+```bash
+python3 tools/context/prove-android-voice-readiness-claim.py
+```
+
+It reads the aggregate readiness journey, re-hashes its production authority,
+Windows hot-shell, and Android wake-loop artifacts, normalizes only measured
+voice metrics, and evaluates `android-voice-production-ready`. A nonzero result
+is the correct outcome whenever device access, freshness, completeness,
+responsiveness, safety, or latency evidence is below contract.
+
 ## Product-Readiness Composition
 
 The wasm-agent product-readiness evaluator is a thin composition layer over
@@ -122,7 +154,6 @@ python3 tools/context/evaluate-wasm-agent-product-readiness.py
 
 # Explicitly execute one journey's registered promises, then normalize.
 python3 tools/context/evaluate-wasm-agent-product-readiness.py --run repository-agent
-python3 tools/context/evaluate-wasm-agent-product-readiness.py --run electron-browser-agent
 python3 tools/context/evaluate-wasm-agent-product-readiness.py --run android-voice-agent
 ```
 
@@ -171,6 +202,12 @@ Poor candidates:
 - ambiguous product decisions
 - one-off forensic investigation
 - proof that requires unavailable human/device/production access
+
+Weak model answers that confuse declared capability with observed state are
+promoted as claim/evidence contract fixtures. The product, window title,
+control label, selector, and exact wording may appear in the fixture, but never
+as a runtime routing rule. Promotion must prove the generic scope-to-receipt
+gate across at least one non-product control fixture.
 
 ## Invalidation
 

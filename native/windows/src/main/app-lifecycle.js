@@ -37,7 +37,7 @@ function writeRecoveryState(filePath, state) {
   }
 }
 
-function installAppLifecycle({ app, processRef = process, webSurfaces, flushAuthCookies, fatalLogPath, recoveryStatePath, now = Date.now, setTimer = setTimeout } = {}) {
+function installAppLifecycle({ app, processRef = process, flushAuthCookies, fatalLogPath, recoveryStatePath, now = Date.now, setTimer = setTimeout } = {}) {
   let recoveryScheduled = false;
 
   const record = (kind, error, extra = {}) => appendEvent(fatalLogPath, {
@@ -82,7 +82,6 @@ function installAppLifecycle({ app, processRef = process, webSurfaces, flushAuth
   processRef.on("uncaughtException", (error, origin) => recover(error, String(origin || "uncaughtException")));
   processRef.on("unhandledRejection", (reason) => record("main-process-unhandled-rejection", reason));
   app.on("before-quit", () => {
-    webSurfaces.disposeAll();
     void flushAuthCookies({ reason: "before_quit" });
   });
   app.on("window-all-closed", () => {

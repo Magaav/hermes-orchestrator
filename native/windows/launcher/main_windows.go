@@ -20,13 +20,25 @@ const (
 )
 
 type supervisorStatus struct {
-	Schema       string   `json:"schema"`
-	OK           bool     `json:"ok"`
-	PID          int      `json:"pid"`
-	ChildPID     int      `json:"childPid"`
-	State        string   `json:"state"`
-	Capabilities []string `json:"capabilities"`
-	UpdatedAt    string   `json:"updatedAt"`
+	Schema       string             `json:"schema"`
+	OK           bool               `json:"ok"`
+	PID          int                `json:"pid"`
+	ChildPID     int                `json:"childPid"`
+	State        string             `json:"state"`
+	Capabilities []string           `json:"capabilities"`
+	UpdatedAt    string             `json:"updatedAt"`
+	Dispatcher   dispatcherRecovery `json:"dispatcher"`
+}
+
+type dispatcherRecovery struct {
+	State          string `json:"state"`
+	CommandID      string `json:"commandId,omitempty"`
+	CommandType    string `json:"commandType,omitempty"`
+	Phase          string `json:"phase,omitempty"`
+	LastProgressAt string `json:"lastProgressAt,omitempty"`
+	LastRecoveryAt string `json:"lastRecoveryAt,omitempty"`
+	RestartCount   int    `json:"restartCount"`
+	Suppressed     bool   `json:"suppressed"`
 }
 
 type commandResult struct {
@@ -40,11 +52,14 @@ type commandResult struct {
 }
 
 type supervisor struct {
-	root       string
-	stateRoot  string
-	commandDir string
-	resultDir  string
-	child      *exec.Cmd
+	root        string
+	stateRoot   string
+	commandDir  string
+	resultDir   string
+	child       *exec.Cmd
+	restarts    []time.Time
+	lastRestart time.Time
+	dispatcher  dispatcherRecovery
 }
 
 type updateHandoff struct {
@@ -136,7 +151,7 @@ func (item *supervisor) status(state string) supervisorStatus {
 	if item.child != nil && item.child.Process != nil {
 		childPID = item.child.Process.Pid
 	}
-	return supervisorStatus{Schema: supervisorSchema, OK: true, PID: os.Getpid(), ChildPID: childPID, State: state, Capabilities: supervisorCapabilities, UpdatedAt: time.Now().UTC().Format(time.RFC3339)}
+	return supervisorStatus{Schema: supervisorSchema, OK: true, PID: os.Getpid(), ChildPID: childPID, State: state, Capabilities: supervisorCapabilities, UpdatedAt: time.Now().UTC().Format(time.RFC3339), Dispatcher: item.dispatcher}
 }
 
 func (item *supervisor) writeStatus(state string) {
@@ -171,6 +186,43 @@ func (item *supervisor) stopChild() {
 		_ = item.child.Process.Kill()
 		item.child = nil
 	}
+}
+
+func (item *supervisor) recoverDispatcher() {
+	leasePath := filepath.Join(item.stateRoot, "dispatcher-lease.json")
+	data, err := os.ReadFile(leasePath)
+	if err != nil {
+		return
+	}
+	var lease dispatcherLease
+	if json.Unmarshal(data, &lease) != nil {
+		return
+	}
+	item.dispatcher = dispatcherRecovery{State: "healthy", CommandID: lease.CommandID, CommandType: lease.CommandType, Phase: lease.Phase, LastProgressAt: lease.UpdatedAt, LastRecoveryAt: item.lastRestart.Format(time.RFC3339), RestartCount: len(item.restarts)}
+	now := time.Now().UTC()
+	if !dispatcherLeaseExpired(lease, now) {
+		return
+	}
+	if !recoveryAllowed(item.restarts, item.lastRestart, now) {
+		item.dispatcher.State = "restart_suppressed"
+		item.dispatcher.Suppressed = true
+		item.writeStatus("dispatcher_restart_suppressed")
+		return
+	}
+	item.stopChild()
+	startErr := item.startChild()
+	item.lastRestart = now
+	item.restarts = append(item.restarts, now)
+	if len(item.restarts) > maxRecoveryRestarts {
+		item.restarts = item.restarts[len(item.restarts)-maxRecoveryRestarts:]
+	}
+	item.dispatcher = dispatcherRecovery{State: "restarted", CommandID: lease.CommandID, CommandType: lease.CommandType, Phase: lease.Phase, LastProgressAt: lease.UpdatedAt, LastRecoveryAt: now.Format(time.RFC3339), RestartCount: len(item.restarts)}
+	if startErr != nil {
+		item.dispatcher.State = "restart_failed"
+	}
+	_ = writeJSONAtomic(filepath.Join(item.stateRoot, "dispatcher-recovery.json"), item.dispatcher)
+	_ = os.Remove(leasePath)
+	item.writeStatus(item.dispatcher.State)
 }
 
 func (item *supervisor) result(command supervisorCommand, ok bool, action, failure string) {
@@ -306,6 +358,7 @@ func (item *supervisor) handle(command supervisorCommand) bool {
 }
 
 func (item *supervisor) poll() bool {
+	item.recoverDispatcher()
 	entries, _ := os.ReadDir(item.commandDir)
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {

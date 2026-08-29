@@ -13,8 +13,9 @@ assert(clientSource.includes('["/S", "/currentuser"]'), "fallback update activat
 assert.strictEqual(client.supervisorStatus().state, "unavailable");
 fs.writeFileSync(path.join(temporary, "update-timeline.json"), JSON.stringify({ schema: "hermes.wasm_agent.windows_update_timeline.v1", phase: "installer_started", expectedBuildId: "win-x64-test" }));
 assert.strictEqual(client.supervisorStatus().updateTimeline.phase, "installer_started");
-fs.writeFileSync(path.join(temporary, "status.json"), JSON.stringify({ schema: client.SCHEMA, ok: true, state: "running", capabilities: ["update.activate"] }));
+fs.writeFileSync(path.join(temporary, "status.json"), JSON.stringify({ schema: client.SCHEMA, ok: true, state: "running", capabilities: ["update.activate", "dispatcher.recover"], dispatcher: { state: "healthy", restartCount: 0 } }));
 assert.strictEqual(client.supervisorStatus().state, "running");
+assert.strictEqual(client.supervisorStatus().dispatcher.state, "healthy");
 assert.strictEqual(client.supervisorStatus().updateTimeline.expectedBuildId, "win-x64-test");
 
 async function verifyCommandRoundTrip() {

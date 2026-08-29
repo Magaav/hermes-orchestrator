@@ -48,6 +48,8 @@ def _evidence_floor(envelope: dict[str, Any], intent_name: str, caps: list[str])
     requested = str(envelope.get("evidence_floor") or envelope.get("evidenceFloor") or "").strip().lower()
     if requested in {"conceptual", "route", "source", "proof", "runtime"}:
         return requested
+    if intent.objective_is_self_reflection(envelope):
+        return "conceptual"
     if intent_name == "source_investigation":
         return "source"
     if intent_name == "runtime_inspection":
@@ -90,7 +92,7 @@ def _depth(envelope: dict[str, Any], intent_name: str) -> dict[str, Any]:
     if requested in {"quick", "normal", "deep", "free"}:
         level = requested
     else:
-        if intent_name == "diagnosis":
+        if intent_name == "diagnosis" or intent.objective_is_self_reflection(envelope):
             level = "deep"
         else:
             level = "normal"
@@ -163,6 +165,10 @@ def _intent_name(envelope: dict[str, Any]) -> str:
     objective = str(envelope.get("objective") or "")
     if intent.objective_is_declared_client_action(envelope):
         return "client_action"
+    if objective_kind == "client_action" and intent.objective_is_diagnosis_intent(envelope):
+        return "runtime_inspection"
+    if intent.objective_is_self_reflection(envelope):
+        return "answer"
     if objective_kind == "model_decision" and intent.text_is_capability_inquiry(objective):
         return "capability_inquiry"
     if objective_kind in {
@@ -228,6 +234,7 @@ def task_contract(envelope: dict[str, Any]) -> dict[str, Any]:
         "tools_first": tools_first,
         "executor": executor,
         "proof_required": proof,
+        "finalization_contract": "plain" if evidence_floor == "conceptual" else "claim_bound",
         "block_codes": block_codes,
         "hermes": "subagent_harness_only",
     }

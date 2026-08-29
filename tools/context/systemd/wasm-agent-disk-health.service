@@ -1,0 +1,7 @@
+[Unit]
+Description=WASM Agent bounded disk-health cleanup and proof
+
+[Service]
+Type=oneshot
+WorkingDirectory=/local
+ExecStart=/usr/bin/python3 /local/tools/context/check-disk-health.py --cleanup

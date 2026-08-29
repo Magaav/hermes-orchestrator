@@ -1,0 +1,122 @@
+{
+  "capability_ok": true,
+  "capability_used": true,
+  "changed_files": [],
+  "duration_ms": 25216,
+  "expected_capability": "client.windows.desktop.windows.list",
+  "expected_proof": "windows.desktop.top_level_windows",
+  "fixture": "windows-list",
+  "label": "new-session",
+  "ok": true,
+  "performance": {
+    "checkpoint": {
+      "count": 4,
+      "duration_ms": 133
+    },
+    "phases": {
+      "host_after_last_provider_ms": 126,
+      "host_before_first_provider_ms": 68,
+      "host_between_providers_ms": 10434,
+      "ingress_to_v6_ms": 0,
+      "provider_ms": 14499
+    },
+    "projection": {
+      "body_bytes": 35696,
+      "calls": 3,
+      "message_content_bytes": 22746,
+      "messages_bytes": 23879,
+      "tools_bytes": 7965
+    },
+    "provider_calls": [
+      {
+        "decision": 1,
+        "duration_ms": 5565,
+        "ok": true,
+        "projection": {
+          "body_bytes": 8205,
+          "message_content_bytes": 4136,
+          "messages_bytes": 4266,
+          "tools_bytes": 2655
+        }
+      },
+      {
+        "decision": 2,
+        "duration_ms": 3189,
+        "ok": true,
+        "projection": {
+          "body_bytes": 12101,
+          "message_content_bytes": 7923,
+          "messages_bytes": 8162,
+          "tools_bytes": 2655
+        }
+      },
+      {
+        "decision": 3,
+        "duration_ms": 5745,
+        "ok": true,
+        "projection": {
+          "body_bytes": 15390,
+          "message_content_bytes": 10687,
+          "messages_bytes": 11451,
+          "tools_bytes": 2655
+        }
+      }
+    ],
+    "schema": "master.frontier.v6.performance.v1",
+    "total_ms": 25128,
+    "v6_internal_ms": 25128
+  },
+  "proof_verified": true,
+  "provider_calls": 3,
+  "reply": "Visible top-level Windows applications (12 windows): WASM Agent; Google Chrome (2 active windows and 3 minimized windows); Visual Studio Code (2 windows); Windows Terminal (2 windows); Command Prompt; TextInputHost; Windows Explorer.",
+  "run_id": "wa_run_6ebe53a724bc4a2892559bef78b4673b",
+  "schema": "mf-v7.pilot.live-fixture.v1",
+  "session_id": "mfv6-hot-windows-c",
+  "token_usage": {
+    "calls": 3,
+    "context_window_tokens": 258400,
+    "exact": true,
+    "metered_calls": 3,
+    "model": "gpt-5.6-luna",
+    "provider_compaction_generation": 0,
+    "provider_compaction_status": "none",
+    "provider_thread_fork_reason": "",
+    "provider_thread_id": "01a0443e-e371-7953-b3ec-33a5da0153c6",
+    "provider_thread_resumed": false,
+    "provider_thread_turn": 3,
+    "rate_limits": {
+      "seven_day": {
+        "percent_left": 98,
+        "percent_used": 2,
+        "resets_at": 1788452773,
+        "window_duration_minutes": 10080
+      }
+    },
+    "stable_context_mode": "thread_continuation",
+    "stable_context_reused": true,
+    "status_telemetry": {
+      "captured_at": 1787851391,
+      "context_window": {
+        "source": "codex_app_server.token_usage",
+        "status": "reported",
+        "tokens": 258400
+      },
+      "model": {
+        "source": "resolved_request",
+        "status": "reported",
+        "value": "gpt-5.6-luna"
+      },
+      "schema": "hermes.wasm_agent.provider_status.v1",
+      "seven_day": {
+        "percent_left": 98,
+        "percent_used": 2,
+        "resets_at": 1788452773,
+        "source": "codex_app_server.account_rate_limits",
+        "status": "reported",
+        "window_duration_minutes": 10080
+      }
+    },
+    "total_tokens": 54007
+  },
+  "user_id_hash": "9633b2c7acf90741"
+}

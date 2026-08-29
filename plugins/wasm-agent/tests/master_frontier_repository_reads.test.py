@@ -89,6 +89,31 @@ class RepositoryReadTests(unittest.TestCase):
         self.assertEqual(secret["matches"], [])
         self.assertIn("safe.py", {item["file"] for item in safe["matches"]})
 
+    def test_search_cross_root_result_is_directly_readable(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "workspace"
+            context = Path(tmp) / "context"
+            root.mkdir(); context.mkdir()
+            (context / "HARNESS.md").write_text("CROSS_ROOT_PROMISE exists\n", encoding="utf-8")
+            route = {
+                "route_id": "fixture", "workspace_root": str(root),
+                "allowed_read_roots": [str(root), str(context)],
+                "source_index": {
+                    "include_roots": ["../context"], "exclude_globs": [],
+                    "max_file_bytes": 10000, "max_total_bytes": 100000,
+                },
+            }
+            result = evidence.compound_discover({
+                "operation_id": "cross-root", "request_id": "cross-root",
+                "query": "CROSS_ROOT_PROMISE",
+            }, route)
+            matched = next(item for item in result["matches"] if item["file"].endswith("HARNESS.md"))
+            read = repository_reads.read_lines(route, matched["file"])
+
+        self.assertEqual(result["searched_roots"], ["../context"])
+        self.assertEqual(matched["file"], "../context/HARNESS.md")
+        self.assertIn("CROSS_ROOT_PROMISE exists", read["content"])
+
     def test_search_route_scan_bound_reaches_match_beyond_index_prefix(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); target = root / "late.py"

@@ -43,7 +43,8 @@ COMMANDS: dict[str, tuple[str, dict[str, Any]]] = {
     "get_bridge_status": ("get_bridge_status", {}),
     "get_native_kernel_status": ("get_native_kernel_status", {}),
     "sync_downloaded_runtime": ("sync_downloaded_runtime", {"forceSync": True}),
-    "list_hot_operations": ("list_hot_operations", {"forceSync": True}),
+    "sync_downloaded_hot_ops": ("sync_downloaded_hot_ops", {}),
+    "list_hot_operations": ("list_hot_operations", {}),
     "run_shell_self_test": ("run_shell_self_test", {}),
     "canary_echo": ("run_hot_operation", {"operationName": "canary_echo", "dryRun": True, "args": {"dryRun": True}}),
     "hot_op_lightweight_snapshot": ("run_hot_operation", {"operationName": "hot_op_lightweight_snapshot", "args": {}}),
@@ -137,6 +138,46 @@ def hot_operation_name(native_command: str, payload: dict[str, Any]) -> str:
     return str(payload.get("operationName") or payload.get("operation") or "").strip()
 
 
+def sync_lifecycle(result: dict[str, Any]) -> dict[str, Any]:
+    lifecycle = result.get("syncLifecycle") if isinstance(result.get("syncLifecycle"), dict) else {}
+    return {
+        "schema": str(lifecycle.get("schema") or ""),
+        "phase": str(lifecycle.get("phase") or "unknown"),
+        "generation": int(lifecycle.get("generation") or 0),
+        "accepted": result.get("accepted") is True,
+        "deduplicated": result.get("deduplicated") is True,
+        "ok": lifecycle.get("ok") if isinstance(lifecycle.get("ok"), bool) else None,
+        "changed": lifecycle.get("changed") if isinstance(lifecycle.get("changed"), bool) else None,
+        "ageMs": int(lifecycle.get("ageMs") or 0),
+        "stuck": lifecycle.get("stuck") is True,
+        "error": str(lifecycle.get("error") or ""),
+    }
+
+
+def observed_sync_lifecycle(sync_result: dict[str, Any], list_result: dict[str, Any]) -> dict[str, Any]:
+    started = sync_lifecycle(sync_result)
+    observed = sync_lifecycle(list_result) if list_result.get("syncLifecycle") else started
+    return {**observed, "accepted": started["accepted"], "deduplicated": started["deduplicated"]}
+
+
+def validate_sync_liveness(sync_result: dict[str, Any], list_result: dict[str, Any]) -> str:
+    started = sync_lifecycle(sync_result)
+    observed = sync_lifecycle(list_result)
+    if sync_result.get("ok") is not True or not started["accepted"] or sync_result.get("completed") is not False:
+        return "hot_ops_sync_not_accepted"
+    if started["phase"] != "running" or started["generation"] <= 0:
+        return "hot_ops_sync_lifecycle_missing"
+    if list_result.get("ok") is not True or observed["generation"] != started["generation"]:
+        return "hot_ops_sync_generation_mismatch"
+    if observed["stuck"]:
+        return "hot_ops_sync_stuck"
+    if observed["phase"] == "failed" or observed["ok"] is False:
+        return "hot_ops_sync_failed"
+    if observed["phase"] not in {"running", "completed"}:
+        return "hot_ops_sync_lifecycle_missing"
+    return "pass"
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--origin", default=os.getenv("WASM_AGENT_ORIGIN", DEFAULT_ORIGIN))
@@ -177,6 +218,7 @@ def main() -> int:
             "get_bridge_status",
             "get_native_kernel_status",
             "sync_downloaded_runtime",
+            "sync_downloaded_hot_ops",
             "list_hot_operations",
             "run_shell_self_test",
             "canary_echo",
@@ -273,8 +315,20 @@ def main() -> int:
                     if failure == "unknown_failure":
                         failure = "runtime_download_failed"
                     return item
+            elif label == "sync_downloaded_hot_ops":
+                lifecycle = sync_lifecycle(result)
+                if result.get("ok") is not True or not lifecycle["accepted"] or lifecycle["phase"] != "running":
+                    failure = "hot_ops_sync_not_accepted"
+                    return item
             elif label == "list_hot_operations":
                 available_hot_operations = available_hot_operation_names(result)
+                sync_item = results.get("sync_downloaded_hot_ops") if isinstance(results.get("sync_downloaded_hot_ops"), dict) else {}
+                sync_result = sync_item.get("result") if isinstance(sync_item.get("result"), dict) else {}
+                if sync_result:
+                    liveness_failure = validate_sync_liveness(sync_result, result)
+                    if liveness_failure != "pass":
+                        failure = liveness_failure
+                        return item
                 if "canary_echo" not in available_hot_operations:
                     requested_hot_operation = "canary_echo"
                     failure = "hot_operation_missing"
@@ -364,11 +418,13 @@ def main() -> int:
     bridge_status = unwrap_result(results.get("get_bridge_status", {}).get("record", {}))
     kernel_status = unwrap_result(results.get("get_native_kernel_status", {}).get("record", {}))
     runtime_sync = unwrap_result(results.get("sync_downloaded_runtime", {}).get("record", {}))
+    hot_ops_sync = unwrap_result(results.get("sync_downloaded_hot_ops", {}).get("record", {}))
     hot_ops = unwrap_result(results.get("list_hot_operations", {}).get("record", {}))
     self_test = unwrap_result(results.get("run_shell_self_test", {}).get("record", {}))
     canary = unwrap_result(results.get("canary_echo", {}).get("record", {}))
-    active_root = hot_ops.get("hotOpsMode") or bridge_status.get("hotOperations", {}).get("hotOpsMode") or ""
-    downloaded_sync = hot_ops.get("downloadedHotOpsSync") if isinstance(hot_ops.get("downloadedHotOpsSync"), dict) else {}
+    bridge_hot_ops = bridge_status.get("hotOperations") if isinstance(bridge_status.get("hotOperations"), dict) else {}
+    active_root = hot_ops.get("hotOpsMode") or bridge_hot_ops.get("hotOpsMode") or bridge_hot_ops.get("mode") or ""
+    hot_ops_sync_lifecycle = observed_sync_lifecycle(hot_ops_sync, hot_ops)
     downloaded_runtime = runtime_sync.get("downloadedRuntime") if isinstance(runtime_sync.get("downloadedRuntime"), dict) else {}
     if not downloaded_runtime:
         downloaded_runtime = bridge_status.get("downloadedRuntime") if isinstance(bridge_status.get("downloadedRuntime"), dict) else {}
@@ -401,11 +457,11 @@ def main() -> int:
         "activeDownloadedRuntimeId": downloaded_runtime.get("activeRuntimeId") or downloaded_runtime.get("activeBundleId") or "",
         "activeDownloadedRuntimeSha": downloaded_runtime.get("activeRuntimeSha") or downloaded_runtime.get("activeBundleSha") or "",
         "activeHotOpsRoot": active_root,
-        "downloadedHotOpsSync": downloaded_sync,
-        "canaryOp": "pass" if canary.get("ok") else "fail",
-        "adb": "available" if checks.get("adb_discoverable") else "unavailable",
-        "androidDiscoveryStatus": adb_status or ("one_authorized_device" if checks.get("authorized_android_device_present") else "unknown"),
-        "androidDevice": "authorized" if checks.get("authorized_android_device_present") else (adb_status or "missing"),
+        "hotOpsSyncLifecycle": hot_ops_sync_lifecycle,
+        "canaryOp": "pass" if canary.get("ok") else ("fail" if canary else "not_run"),
+        "adb": "available" if checks.get("adb_discoverable") else ("unavailable" if checks else "not_checked"),
+        "androidDiscoveryStatus": adb_status or ("one_authorized_device" if checks.get("authorized_android_device_present") else "not_checked"),
+        "androidDevice": "authorized" if checks.get("authorized_android_device_present") else (adb_status or "not_checked"),
         "results": results,
         "nativeControlCleanup": cleanup,
         "roundTrip": {
@@ -433,13 +489,23 @@ def main() -> int:
     native_kernel_capabilities = native_kernel.get("capabilities") if isinstance(native_kernel.get("capabilities"), list) else []
     if not native_kernel_capabilities and isinstance(native_kernel.get("supportedCapabilities"), list):
         native_kernel_capabilities = native_kernel.get("supportedCapabilities") or []
-    print(f"Native kernel: contract={native_kernel.get('contractVersion') or native_kernel.get('kernelContractVersion') or 'unknown'} capabilities={len(native_kernel_capabilities)}")
+    if kernel_status:
+        print(f"Native kernel: contract={native_kernel.get('contractVersion') or native_kernel.get('kernelContractVersion') or 'unknown'} capabilities={len(native_kernel_capabilities)}")
     print(f"Downloaded runtime: ok={downloaded_runtime.get('ok')} activeId={output['activeDownloadedRuntimeId'] or 'unknown'} activeSha={output['activeDownloadedRuntimeSha'] or 'unknown'}")
     print(f"Active hot ops root: {active_root or 'unknown'}")
-    print(f"Downloaded hot ops sync: ok={downloaded_sync.get('ok')} changed={downloaded_sync.get('changed')} feedBundleId={downloaded_sync.get('feedBundleId') or 'unknown'} cachedBundleId={downloaded_sync.get('cachedBundleId') or 'unknown'} moduleSha={downloaded_sync.get('moduleSha') or 'unknown'}")
-    print(f"Canary op: {output['canaryOp']}")
-    print(f"ADB: {output['adb']}")
-    print(f"Android device: {output['androidDevice']}")
+    if hot_ops_sync or hot_ops.get("syncLifecycle"):
+        print(
+            "Hot ops sync lifecycle: "
+            f"phase={hot_ops_sync_lifecycle['phase']} generation={hot_ops_sync_lifecycle['generation']} "
+            f"accepted={hot_ops_sync_lifecycle['accepted']} deduplicated={hot_ops_sync_lifecycle['deduplicated']} "
+            f"ok={hot_ops_sync_lifecycle['ok']} changed={hot_ops_sync_lifecycle['changed']} "
+            f"ageMs={hot_ops_sync_lifecycle['ageMs']} stuck={hot_ops_sync_lifecycle['stuck']}"
+        )
+    if canary:
+        print(f"Canary op: {output['canaryOp']}")
+    if checks or adb_discovery:
+        print(f"ADB: {output['adb']}")
+        print(f"Android device: {output['androidDevice']}")
     if cleanup:
         print(
             "Native-control cleanup: "

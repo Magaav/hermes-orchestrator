@@ -16,7 +16,7 @@ SERVER = ROOT / "plugins/wasm-agent/server"
 REPORT = ROOT / "reports/context/latest/master-frontier-v6-kernel-result.json"
 sys.path.insert(0, str(SERVER))
 
-from master_frontier.v6 import adapters, contracts, controller, kernel, projection  # noqa: E402
+from master_frontier.v6 import adapters, capability_routing, context_accounting, contracts, controller, kernel, projection  # noqa: E402
 
 
 PAYLOAD_CHARS = 250_000
@@ -57,7 +57,10 @@ def context_proof() -> dict[str, Any]:
             return tool("execute", {"operations": [{"id": "op.read", "cap": "repo.read", "args": {"path": "owner.py"}}]})
         if index == 3:
             decoded = projection.decode(messages[1]["content"])
-            evidence_id = str(decoded["receipts"][0]["observed"]["evidence"])
+            evidence_id = str(next(
+                item["id"] for item in decoded["evidence"]
+                if item.get("subject") == "operation:op.read"
+            ))
             return tool("detail", {
                 "kind": "evidence", "id": evidence_id,
                 "pointer": "/observed/content", "max_chars": 4_096,
@@ -181,22 +184,28 @@ def goal_action_proof() -> dict[str, Any]:
 
 
 def client_action_loop_proof() -> dict[str, Any]:
-    manifest = {
-        "runtime_type": "electron", "client_id": "electron-proof",
-        "capabilities": ["control.browser.javascript.execute.unrestricted"],
-    }
-    javascript = next(
-        item for item in adapters.live_client(manifest)
-        if item["id"] == "client.browser.javascript.execute.unrestricted"
+    from master_frontier.v6 import browser_procedure_plugin
+    procedure = next(
+        item for item in browser_procedure_plugin.capabilities(
+            {"run_hot_operation"}, client_id="windows-proof", binding="client:windows-proof",
+        )
+        if item["id"] == "client.windows.browser.cdp.procedure"
     )
     agent = kernel.Kernel(
         authorities={"client.ui.control"}, completion_requirements={"goal_action"},
     )
-    agent.register(javascript, lambda _capability, _operation: {
-        "ok": True, "state": "acknowledged", "observed": {"result": "sent"},
-        "proof": ["client.ack", "native.web_surface.javascript.execute.unrestricted", "client.page.postcondition.observed"],
+    agent.register(procedure, lambda _capability, _operation: {
+        "ok": True, "state": "acknowledged", "observed": {
+            "model_projection": {
+                "action": {"dispatched": True, "stepCount": 2},
+                "observation": {"assertionCount": 1},
+                "completion_proof": {"ok": True, "passed": 1, "failed": 0},
+            },
+            "answer": "Completed the browser procedure and independently verified its assertion.",
+        },
+        "proof": ["windows.browser.cdp.procedure.completed"],
     })
-    visible = {javascript["id"]}
+    visible = {procedure["id"]}
     decisions = []
 
     def complete(messages: list[dict[str, str]], _tools: list[dict[str, Any]], index: int) -> dict[str, Any]:
@@ -204,10 +213,20 @@ def client_action_loop_proof() -> dict[str, Any]:
         if index in {1, 2}:
             decisions.append("execute")
             return tool("execute", {"goals": [{
-                "id": "message-sent", "cap": javascript["id"], "outcome": "Browser message is sent",
+                "id": "message-sent", "cap": procedure["id"], "outcome": "Browser message is sent",
             }], "operations": [{
-                "id": "send_message", "cap": javascript["id"],
-                "args": {"javascript": "return 'sent'"}, "completes_goal": True, "goal_id": "message-sent",
+                "id": "send_message", "cap": procedure["id"],
+                "args": {
+                    "steps": [
+                        {"locator": "#message", "action": "set_value", "value": "hi"},
+                        {"locator": "#message", "action": "key", "key": "Enter"},
+                    ],
+                    "assertions": [{
+                        "id": "sent-message", "selector": "#messages .outgoing:last-child",
+                        "property": "last_text", "transition": "became_equal", "equals": "hi",
+                    }],
+                },
+                "completes_goal": True, "goal_id": "message-sent",
             }]})
         decisions.append("answer")
         return {"reply": "Sent."}
@@ -220,8 +239,63 @@ def client_action_loop_proof() -> dict[str, Any]:
         "providerCalls": len(result["trace"]),
         "decisions": decisions,
         "completionGaps": agent.completion_gaps(),
-        "javascriptDiscoverableForSend": bool(agent.catalog.search("send message")),
+        "procedureDiscoverableForSend": bool(agent.catalog.search("send message procedure")),
         "answer": result["answer"],
+    }
+
+
+def bounded_terminal_proof() -> dict[str, Any]:
+    manifest = {
+        "runtime_type": "electron", "client_id": "windows-proof",
+        "capabilities": ["run_hot_operation", "windows.shell.execute.unrestricted"],
+    }
+    capabilities = adapters.live_client(manifest)
+    agent = kernel.Kernel(
+        authorities={"client.ui.control", "client.ui.inspect"},
+        completion_requirements={"goal_action"},
+    )
+    for capability in capabilities:
+        if capability["authority"] in agent.authorities:
+            agent.register(capability, lambda cap, _operation: {
+                "ok": True, "state": "completed",
+                "observed": {"answer": "Opened the durable default CDP realm."},
+                "proof": cap.get("proof") or [],
+            })
+    selected = capability_routing.initial_client_capabilities(
+        agent.catalog, topology={"default_execution_realm": "native_windows"},
+    )
+    default_id = "client.windows.browser.cdp.default.open"
+    persistent_id = "client.windows.browser.cdp.persistent.open"
+    incognito_id = "client.windows.browser.cdp.incognito.open"
+    calls = 0
+
+    def complete(_messages: list[dict[str, str]], _tools: list[dict[str, Any]], _index: int) -> dict[str, Any]:
+        nonlocal calls
+        calls += 1
+        return tool("execute", {"operations": [{"id": "open-cdp", "cap": default_id, "args": {}}]})
+
+    result = controller.run(
+        "Open CDP", agent, complete, initial_discovered=selected, max_decisions=1,
+    )
+    measurement, _ = context_accounting.measure(
+        [{"role": "system", "content": "rules"}, {"role": "user", "content": "goal"}], [],
+    )
+    transport = context_accounting.attach_usage(
+        measurement, {"input_tokens": 20_000, "cached_input_tokens": 18_000},
+    )["transport_accounting"]
+    return {
+        "providerCalls": calls,
+        "answer": result.get("answer"),
+        "goalContract": (result.get("state", {}).get("decision") or {}).get("goal_contract"),
+        "defaultInitiallyVisible": default_id in selected,
+        "persistentInitiallyHidden": persistent_id not in selected,
+        "incognitoInitiallyHidden": incognito_id not in selected,
+        "incognitoDiscoverable": incognito_id in {item["id"] for item in agent.catalog.search("incognito CDP")},
+        "defaultAuthorization": agent.catalog.get(default_id).get("authorization"),
+        "unrestrictedAuthorization": (
+            agent.catalog.get("client.windows.shell.execute.unrestricted") or {}
+        ).get("authorization"),
+        "transportAccounting": transport,
     }
 
 
@@ -247,6 +321,7 @@ def main() -> int:
         compact_read = compact_read_proof()
         goal_action = goal_action_proof()
         client_action_loop = client_action_loop_proof()
+        bounded_terminal = bounded_terminal_proof()
         checks = {
             "constantFourProviderTools": context["providerToolCount"] == 4,
             "catalogScalesOutsidePrompt": context["registeredCapabilities"] == 513,
@@ -266,15 +341,31 @@ def main() -> int:
                 and goal_action["afterResume"] == []
             ),
             "clientActionLoopStaysWithinThreeCalls": (
-                client_action_loop["providerCalls"] <= 3
-                and client_action_loop["decisions"] == ["execute", "execute", "answer"]
+                client_action_loop["providerCalls"] == 2
+                and client_action_loop["decisions"] == ["execute", "execute"]
                 and client_action_loop["completionGaps"] == []
-                and client_action_loop["javascriptDiscoverableForSend"]
+                and client_action_loop["procedureDiscoverableForSend"]
+            ),
+            "defaultCdpIsDemandShaped": (
+                bounded_terminal["defaultInitiallyVisible"]
+                and bounded_terminal["persistentInitiallyHidden"]
+                and bounded_terminal["incognitoInitiallyHidden"]
+                and bounded_terminal["incognitoDiscoverable"]
+            ),
+            "boundedTerminalCompletesInOneCall": (
+                bounded_terminal["providerCalls"] == 1
+                and bounded_terminal["goalContract"] == "host_bounded_terminal"
+                and bounded_terminal["defaultAuthorization"] == "bounded_terminal"
+                and bounded_terminal["unrestrictedAuthorization"] == "reviewed"
+            ),
+            "transportOverheadRemainsExplicitlyEstimated": (
+                bounded_terminal["transportAccounting"]["exact"] is False
+                and bounded_terminal["transportAccounting"]["transport_overhead_tokens_estimate"] > 0
             ),
         }
         errors = [name for name, passed in checks.items() if not passed]
     except Exception as exc:  # noqa: BLE001 - proof must serialize its failure class.
-        context, parallel, compact_read, goal_action, client_action_loop, checks = {}, {}, {}, {}, {}, {}
+        context, parallel, compact_read, goal_action, client_action_loop, bounded_terminal, checks = {}, {}, {}, {}, {}, {}, {}
         errors = [f"proof_exception:{type(exc).__name__}:{exc}"]
     report = {
         "ok": not errors,
@@ -282,6 +373,7 @@ def main() -> int:
         "checkedAt": datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
         "context": context, "parallel": parallel, "compactRead": compact_read, "goalAction": goal_action,
         "clientActionLoop": client_action_loop, "checks": checks,
+        "boundedTerminal": bounded_terminal,
         "observedV5Failure": observed_v5_run(), "errors": errors,
     }
     REPORT.parent.mkdir(parents=True, exist_ok=True)

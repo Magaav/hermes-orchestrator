@@ -33,8 +33,7 @@ def _bounded(value: Any, depth: int = 0) -> Any:
     if isinstance(value, str):
         return value[:4000]
     if isinstance(value, list):
-        items = value[-6:] if depth and all(isinstance(item, str) for item in value) else value[:40]
-        return [_bounded(item, depth + 1) for item in items]
+        return [_bounded(item, depth + 1) for item in value[:40]]
     if isinstance(value, dict):
         return {str(key)[:120]: _bounded(item, depth + 1) for key, item in list(value.items())[:80]}
     return str(value)[:4000]

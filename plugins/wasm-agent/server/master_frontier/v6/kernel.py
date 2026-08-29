@@ -61,8 +61,17 @@ class Kernel:
         })
 
     def _execute_one(self, operation: dict[str, Any], capability: dict[str, Any]) -> dict[str, Any]:
-        operation_digest = contracts.digest({key: operation.get(key) for key in ("id", "cap", "args", "after", "expect", "completes_goal", "goal_id")})
+        operation_digest = contracts.digest({key: operation.get(key) for key in ("id", "cap", "args", "after", "expect", "completes_goal", "goal_id", "idempotency_key")})
         with self._ledger_lock:
+            idempotency_key = str(operation.get("idempotency_key") or operation["id"])
+            duplicate = next((item for item in self._operation_ledger.values() if str((item.get("operation") or {}).get("idempotency_key") or "") == idempotency_key), None)
+            if duplicate is not None and str((duplicate.get("operation") or {}).get("id") or "") != operation["id"]:
+                if isinstance(duplicate.get("receipt"), dict):
+                    replayed = {**duplicate["receipt"], "op": operation["id"]}
+                    if self.event_sink:
+                        self.event_sink({"type": "operation.replayed", "operation": operation["id"], "capability": capability["id"], "receipt": duplicate["receipt"]["id"], "idempotency_key": idempotency_key})
+                    return contracts.receipt(replayed)
+                return contracts.receipt({"id": f"rcpt:{operation['id']}:inflight", "op": operation["id"], "ok": False, "state": "pending", "error": {"code": "idempotency_inflight"}})
             existing = self._operation_ledger.get(operation["id"])
             if existing is not None:
                 if existing["digest"] != operation_digest:
@@ -105,7 +114,12 @@ class Kernel:
                 state = str(raw.get("state") or ("completed" if ok else "failed"))
                 proof = raw.get("proof") if isinstance(raw.get("proof"), list) else []
                 error = raw.get("error") if isinstance(raw.get("error"), dict) else {}
-                if ok and operation["expect"] and not expectations.satisfied(operation["expect"], observed):
+                # Top-level expectations are write postconditions. Read/observe
+                # capabilities already return bounded evidence, and capability-
+                # specific verification inputs (for example desktop.prove)
+                # remain schema checked by the adapter. Do not let a model-made
+                # matcher turn a successful observation into a failed read.
+                if ok and capability.get("mode") == "write" and operation["expect"] and not expectations.satisfied(operation["expect"], observed):
                     ok, state, error = False, "failed", {"code": "expectation_mismatch", "expected": operation["expect"]}
                 receipt = contracts.receipt({
                     "id": str(raw.get("id") or f"rcpt:{operation['id']}"), "op": operation["id"],
@@ -194,8 +208,10 @@ class Kernel:
         }
         if "goal_action" in self.completion_requirements and any(
             item.get("operation", {}).get("completes_goal") is True
-            and (self.catalog.get(str(item.get("capability") or "")) or {}).get("mode") == "write"
-            and set((self.catalog.get(str(item.get("capability") or "")) or {}).get("completion_proof") or []).issubset(set(item["receipt"].get("proof") or []))
+            and (capability := self.catalog.get(str(item.get("capability") or ""))) is not None
+            and capability.get("goal_completion") is not False
+            and capability.get("mode") == "write"
+            and set(capability.get("completion_proof") or []).issubset(set(item["receipt"].get("proof") or []))
             for item in successful
         ):
             satisfied.add("goal_action")
@@ -252,6 +268,7 @@ class Kernel:
                         "id": (item.get("operation") or {}).get("id"),
                         "cap": (item.get("operation") or {}).get("cap"),
                         "completes_goal": (item.get("operation") or {}).get("completes_goal") is True,
+                        "idempotency_key": (item.get("operation") or {}).get("idempotency_key"),
                     },
                     "capability": item.get("capability"), "sequence": item.get("sequence"),
                 }

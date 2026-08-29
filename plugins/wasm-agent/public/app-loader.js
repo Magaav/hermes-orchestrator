@@ -1,6 +1,14 @@
 (() => {
-  const ANDROID_APP_BOOT_BUILD = "20260815-avatar-always-top1";
   const ANDROID_RUNTIME_MODE_STORAGE_KEY = "wasmAgent.androidRuntimeMode.v1";
+
+  async function moduleRelease() {
+    try {
+      const response = await fetch("/module-release.json", { cache: "no-store", headers: { Accept: "application/json" } });
+      const value = response.ok ? await response.json() : null;
+      if (value?.schema === "hermes.wasm_agent.module_release.v1" && /^[a-f0-9]{64}$/.test(String(value.release_id || ""))) return value;
+    } catch {}
+    return null;
+  }
 
   function androidNativeBootHint() {
     try {
@@ -140,6 +148,7 @@
     }
   }
 
+  async function bootRuntime() {
   const isAndroid = androidNativeBootHint();
   const runtimeMode = selectedAndroidRuntimeMode(isAndroid);
   const useDebugLite = isAndroid && runtimeMode === "debug-lite";
@@ -150,9 +159,13 @@
   window.__WASM_AGENT_ANDROID_PERF_SAFE_MODE__ = perfSafeMode;
   window.__WASM_AGENT_ANDROID_BRIDGE_DIAGNOSTICS__ = perfSafeMode ? "off" : "sampled";
   window.__WASM_AGENT_ANDROID_WAKE_STARTUP__ = perfSafeMode ? "off" : "deferred";
-  const target = useDebugLite
-    ? `/android-app.js?v=${ANDROID_APP_BOOT_BUILD}`
-    : `/app.js?v=${ANDROID_APP_BOOT_BUILD}`;
+  const release = await moduleRelease();
+  const target = `/${useDebugLite ? "android-app.js" : "app.js"}?v=${release?.release_id || "fallback"}`;
+  window.__WASM_AGENT_MODULE_RELEASE__ = release ? {
+    schema: release.schema,
+    release_id: release.release_id,
+    entry: target,
+  } : null;
   const script = document.createElement("script");
   script.type = "module";
   script.src = target;
@@ -162,4 +175,6 @@
   const anchor = document.currentScript;
   if (anchor?.parentNode) anchor.parentNode.insertBefore(script, anchor.nextSibling);
   else (document.head || document.documentElement).appendChild(script);
+  }
+  void bootRuntime().catch((error) => reportLoaderFailure("module-release", error));
 })();

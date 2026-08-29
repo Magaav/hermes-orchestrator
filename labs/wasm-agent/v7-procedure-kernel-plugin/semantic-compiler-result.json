@@ -1,0 +1,306 @@
+{
+  "schema": "master.frontier.v7.semantic-compiler-pilot.v1",
+  "decision": "reject-candidate",
+  "model": "frank/GLM-5.2",
+  "durationMs": 18047,
+  "providerCalls": 1,
+  "exactTokens": 1283,
+  "accuracy": 0.875,
+  "heldoutAccuracy": 1.0,
+  "checks": {
+    "oneProviderCall": true,
+    "exactModelProved": true,
+    "allFixturesReturned": true,
+    "allFixturesCorrect": false,
+    "allHeldoutCorrect": true,
+    "zeroUnsafeMisroutes": false,
+    "cleanupComplete": true
+  },
+  "results": [
+    {
+      "id": "w1",
+      "split": "learned",
+      "expected": "windows.apps.list",
+      "actual": "windows.apps.list",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "windows_apps",
+        "persistence": "unspecified",
+        "privacy": "unspecified",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.95
+      }
+    },
+    {
+      "id": "w2",
+      "split": "learned",
+      "expected": "windows.apps.list",
+      "actual": "windows.apps.list",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "windows_apps",
+        "persistence": "unspecified",
+        "privacy": "unspecified",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.95
+      }
+    },
+    {
+      "id": "w3",
+      "split": "learned",
+      "expected": "windows.apps.list",
+      "actual": "windows.apps.list",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "windows_apps",
+        "persistence": "unspecified",
+        "privacy": "unspecified",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.95
+      }
+    },
+    {
+      "id": "p1",
+      "split": "learned",
+      "expected": "browser.cdp.persistent",
+      "actual": "browser.cdp.persistent",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "browser_cdp",
+        "persistence": "unspecified",
+        "privacy": "unspecified",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.9
+      }
+    },
+    {
+      "id": "p2",
+      "split": "learned",
+      "expected": "browser.cdp.persistent",
+      "actual": "browser.cdp.persistent",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "browser_cdp",
+        "persistence": "persistent",
+        "privacy": "default",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.95
+      }
+    },
+    {
+      "id": "i1",
+      "split": "learned",
+      "expected": "browser.cdp.incognito",
+      "actual": "browser.cdp.incognito",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "browser_cdp",
+        "persistence": "ephemeral",
+        "privacy": "private",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.95
+      }
+    },
+    {
+      "id": "i2",
+      "split": "learned",
+      "expected": "browser.cdp.incognito",
+      "actual": "browser.cdp.incognito",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "browser_cdp",
+        "persistence": "ephemeral",
+        "privacy": "private",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.95
+      }
+    },
+    {
+      "id": "h1",
+      "split": "heldout",
+      "expected": "windows.apps.list",
+      "actual": "windows.apps.list",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "windows_apps",
+        "persistence": "unspecified",
+        "privacy": "unspecified",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.9
+      }
+    },
+    {
+      "id": "h2",
+      "split": "heldout",
+      "expected": "browser.cdp.persistent",
+      "actual": "browser.cdp.persistent",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "browser_cdp",
+        "persistence": "persistent",
+        "privacy": "default",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.95
+      }
+    },
+    {
+      "id": "h3",
+      "split": "heldout",
+      "expected": "browser.cdp.incognito",
+      "actual": "browser.cdp.incognito",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "browser_cdp",
+        "persistence": "ephemeral",
+        "privacy": "private",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.95
+      }
+    },
+    {
+      "id": "h4",
+      "split": "heldout",
+      "expected": "browser.cdp.persistent",
+      "actual": "browser.cdp.persistent",
+      "reason": "compiled",
+      "correct": true,
+      "semantic": {
+        "action": "browser_cdp",
+        "persistence": "persistent",
+        "privacy": "default",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.95
+      }
+    },
+    {
+      "id": "u1",
+      "split": "negative",
+      "expected": "provider_fallback",
+      "actual": "provider_fallback",
+      "reason": "unsupported_action",
+      "correct": true,
+      "semantic": {
+        "action": "other",
+        "persistence": "unspecified",
+        "privacy": "unspecified",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.9
+      }
+    },
+    {
+      "id": "u2",
+      "split": "negative",
+      "expected": "provider_fallback",
+      "actual": "provider_fallback",
+      "reason": "negated",
+      "correct": true,
+      "semantic": {
+        "action": "windows_apps",
+        "persistence": "unspecified",
+        "privacy": "unspecified",
+        "negated": true,
+        "contradiction": false,
+        "confidence": 0.9
+      }
+    },
+    {
+      "id": "u3",
+      "split": "negative",
+      "expected": "provider_fallback",
+      "actual": "windows.apps.list",
+      "reason": "compiled",
+      "correct": false,
+      "semantic": {
+        "action": "windows_apps",
+        "persistence": "unspecified",
+        "privacy": "unspecified",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.85
+      }
+    },
+    {
+      "id": "a1",
+      "split": "adversarial",
+      "expected": "provider_fallback",
+      "actual": "browser.cdp.incognito",
+      "reason": "compiled",
+      "correct": false,
+      "semantic": {
+        "action": "browser_cdp",
+        "persistence": "ephemeral",
+        "privacy": "private",
+        "negated": false,
+        "contradiction": false,
+        "confidence": 0.95
+      }
+    },
+    {
+      "id": "a2",
+      "split": "adversarial",
+      "expected": "provider_fallback",
+      "actual": "provider_fallback",
+      "reason": "negated",
+      "correct": true,
+      "semantic": {
+        "action": "browser_cdp",
+        "persistence": "ephemeral",
+        "privacy": "private",
+        "negated": true,
+        "contradiction": false,
+        "confidence": 0.9
+      }
+    }
+  ],
+  "receipt": {
+    "schema": "wasm-agent.safe-lab.gateway-receipt.v2",
+    "laneId": "harness-07",
+    "requestSha256": "7d4e8e72b882d7cd69e68bd0e3110706fed49bb26135fe8eeb2e069828c5e688",
+    "requestModel": "glm-5.2",
+    "returnedModel": "frank/GLM-5.2",
+    "returnedModelRaw": "glm-5.2",
+    "status": 200,
+    "contractMatch": true,
+    "duplicateOrdinal": 1,
+    "duplicateClass": "initial",
+    "severity": "diagnostic",
+    "upstreamCalled": true,
+    "providerCallOrdinal": 1,
+    "providerCallLimit": 1,
+    "benchmarkScenario": false,
+    "transport": "json",
+    "promptTokens": 366,
+    "completionTokens": 917,
+    "contentChars": 2846,
+    "reasoningChars": 0,
+    "toolCallCount": 0,
+    "toolNames": [],
+    "finishReason": "stop",
+    "durationMs": 11383,
+    "upstreamHost": "opencode.ai",
+    "upstreamPath": "/zen/go/v1/chat/completions"
+  },
+  "errors": []
+}

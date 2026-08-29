@@ -64,6 +64,8 @@ export function masterFrontierFailureDisposition(error = {}) {
     "provider_interrupted",
     "provider_timeout",
     "provider_transport_failed",
+    "v6_provider_interrupted",
+    "v6_run_cancelled",
   ]).has(code) || /\b(?:connection reset|network error|server restart(?:ed)?|transport failure|upstream timeout)\b/.test(reason);
   return { code, interrupted, terminal: interrupted ? "interrupted" : "completed_error" };
 }

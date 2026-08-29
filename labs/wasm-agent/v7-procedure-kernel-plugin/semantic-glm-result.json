@@ -1,0 +1,161 @@
+{
+  "schema": "master.frontier.v7.semantic-glm-pilot.v1",
+  "decision": "reject-candidate",
+  "model": "frank/GLM-5.2",
+  "durationMs": 22931,
+  "providerCalls": 1,
+  "exactTokens": 1449,
+  "accuracy": 0.9375,
+  "heldoutAccuracy": 1.0,
+  "checks": {
+    "oneProviderCall": true,
+    "exactModelProved": true,
+    "zeroUnsafeMisroutes": false,
+    "heldoutCoverageAtLeastHalf": true,
+    "allFixturesReturned": true,
+    "cleanupComplete": true
+  },
+  "results": [
+    {
+      "id": "w1",
+      "split": "learned",
+      "expected": "windows.apps.list",
+      "actual": "windows.apps.list",
+      "correct": true
+    },
+    {
+      "id": "w2",
+      "split": "learned",
+      "expected": "windows.apps.list",
+      "actual": "windows.apps.list",
+      "correct": true
+    },
+    {
+      "id": "w3",
+      "split": "learned",
+      "expected": "windows.apps.list",
+      "actual": "windows.apps.list",
+      "correct": true
+    },
+    {
+      "id": "p1",
+      "split": "learned",
+      "expected": "browser.cdp.persistent",
+      "actual": "browser.cdp.persistent",
+      "correct": true
+    },
+    {
+      "id": "p2",
+      "split": "learned",
+      "expected": "browser.cdp.persistent",
+      "actual": "browser.cdp.persistent",
+      "correct": true
+    },
+    {
+      "id": "i1",
+      "split": "learned",
+      "expected": "browser.cdp.incognito",
+      "actual": "browser.cdp.incognito",
+      "correct": true
+    },
+    {
+      "id": "i2",
+      "split": "learned",
+      "expected": "browser.cdp.incognito",
+      "actual": "browser.cdp.incognito",
+      "correct": true
+    },
+    {
+      "id": "h1",
+      "split": "heldout",
+      "expected": "windows.apps.list",
+      "actual": "windows.apps.list",
+      "correct": true
+    },
+    {
+      "id": "h2",
+      "split": "heldout",
+      "expected": "browser.cdp.persistent",
+      "actual": "browser.cdp.persistent",
+      "correct": true
+    },
+    {
+      "id": "h3",
+      "split": "heldout",
+      "expected": "browser.cdp.incognito",
+      "actual": "browser.cdp.incognito",
+      "correct": true
+    },
+    {
+      "id": "h4",
+      "split": "heldout",
+      "expected": "browser.cdp.persistent",
+      "actual": "browser.cdp.persistent",
+      "correct": true
+    },
+    {
+      "id": "u1",
+      "split": "negative",
+      "expected": "provider_fallback",
+      "actual": "provider_fallback",
+      "correct": true
+    },
+    {
+      "id": "u2",
+      "split": "negative",
+      "expected": "provider_fallback",
+      "actual": "provider_fallback",
+      "correct": true
+    },
+    {
+      "id": "u3",
+      "split": "negative",
+      "expected": "provider_fallback",
+      "actual": "provider_fallback",
+      "correct": true
+    },
+    {
+      "id": "a1",
+      "split": "adversarial",
+      "expected": "provider_fallback",
+      "actual": "browser.cdp.incognito",
+      "correct": false
+    },
+    {
+      "id": "a2",
+      "split": "adversarial",
+      "expected": "provider_fallback",
+      "actual": "provider_fallback",
+      "correct": true
+    }
+  ],
+  "receipt": {
+    "schema": "wasm-agent.safe-lab.gateway-receipt.v2",
+    "laneId": "harness-07",
+    "requestSha256": "f1e48376107e9a8850c78856108c5b7124ca0156139492590834be99e8b67a3e",
+    "requestModel": "glm-5.2",
+    "returnedModel": "frank/GLM-5.2",
+    "returnedModelRaw": "glm-5.2",
+    "status": 200,
+    "contractMatch": true,
+    "duplicateOrdinal": 1,
+    "duplicateClass": "initial",
+    "severity": "diagnostic",
+    "upstreamCalled": true,
+    "providerCallOrdinal": 1,
+    "providerCallLimit": 1,
+    "benchmarkScenario": false,
+    "transport": "json",
+    "promptTokens": 338,
+    "completionTokens": 1111,
+    "contentChars": 502,
+    "reasoningChars": 4394,
+    "toolCallCount": 0,
+    "toolNames": [],
+    "finishReason": "stop",
+    "durationMs": 16188,
+    "upstreamHost": "opencode.ai",
+    "upstreamPath": "/zen/go/v1/chat/completions"
+  },
+  "errors": []
+}

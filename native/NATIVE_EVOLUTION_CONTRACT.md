@@ -37,6 +37,9 @@ native.capabilities.nativeControlPolling.v1
 native.capabilities.crashSafeStatus.v1
 native.capabilities.capabilityManifest.v1
 native.capabilities.observabilityLease.v1
+native.capabilities.unrestrictedExecution.v1
+native.capabilities.companionOverlay.v1
+native.capabilities.windowsUiAutomation.v1
 ```
 
 Android advertised native capabilities:
@@ -92,6 +95,40 @@ login-persistent supervisor owns Electron, the client validates the HTTPS feed,
 build ordering, artifact type, byte size, origin/path, and SHA-256, then invokes
 NSIS silently and relaunches through the supervisor. Normal checks occur once
 at startup and every six hours; observability remains disabled throughout.
+
+Use three evolution lanes instead of rebuilding every change:
+
+| Change | Lane | Windows reinstall |
+| --- | --- | --- |
+| Avatar/chat visuals, layout, transcript, or composer in the cloud PWA | Cloud PWA reload/deploy | No |
+| Downloaded runtime or trusted hot-op behavior on an existing primitive | Atomic runtime/hot-op feed | No |
+| New Electron IPC, OS permission, UIA primitive, supervisor, preload, or installer behavior | `horc build win` plus feed/supervisor update | Once per shell change |
+
+`horc build win` and `horc build android-apk` run the declared-path selector in
+`tools/windows/select-native-evolution-lane.py` before packaging. Cloud-only and
+hot-bundle changes stop with the cheaper lane instead of producing an installer.
+Hot-bundle eligibility is bound to the installed kernel capabilities recorded by
+the latest successful hot-shell proof. Use `HORC_FORCE_NATIVE_REBUILD=1` only
+when the caller intentionally needs a fresh installer from an otherwise mixed or
+externally supplied source set.
+
+After a cloud PWA release, `client.runtime.refresh` is the bounded autonomous
+reload primitive. It is same-origin only, cache-busts the production renderer,
+and returns `client.runtime.refresh.scheduled`; it does not claim the post-load
+renderer healthy. Use the next live heartbeat plus `client.runtime.diagnose`
+as independent post-load proof. Native runtime/hot-op activation continues to
+use SHA-verified staging and last-known-good rollback.
+
+For the companion/desktop surface, the focused source lane is
+`HORC_WIN_FAST_PACK=0 HORC_WIN_FAST_TASKS=test:companion-desktop-source horc build win-fast`.
+It measured 3.390 seconds on Linux aarch64 on 2026-08-26, versus 142.741 and
+169.096 seconds for the two preceding full Windows release records. This is
+source evidence only; it intentionally produces no installer, feed, or
+installed-app proof.
+
+The final lazy-startup companion/UIA release subsequently completed in 112.750
+seconds. Thus the registered source loop is 33.3x faster than the current full
+package lane; use the latter only at the native-shell promotion boundary.
 
 ## Bundle Formats
 

@@ -6,7 +6,7 @@ from typing import Any
 
 from . import authority, budget, client_ui_actions, provider_step, run_control, tool_runtime
 from .v5 import continuity
-from .v6 import controller, kernel, mcp_host, performance, persistence, state as working_state, v5_bridge
+from .v6 import capability_routing, client_topology, controller, execution_profiles, kernel, mcp_host, performance, persistence, procedure_memory, reasoning, stall_diagnostic, state as working_state, trajectory, v5_bridge
 
 
 class V6Error(RuntimeError):
@@ -45,6 +45,8 @@ def _completion_requirements(envelope: dict[str, Any], route: dict[str, Any]) ->
         return {"authority:repo.read"}
     if request_class == "client_action":
         return {"goal_action"}
+    if request_class in {"client_state", "runtime_inspection"}:
+        return {"authority:client.ui.inspect"}
     return set()
 
 
@@ -99,9 +101,17 @@ def execute_owned(
     receiver = str(context.get("receiver") or "provider")
     route = dict(runtime["require_direct_envelope_route_contract"](envelope))
     route["task_contract"] = authority.project_task_contract(envelope, route)
+    try:
+        execution_profile = execution_profiles.resolve(route)
+    except execution_profiles.ProfileError as exc:
+        code = str(exc)
+        runtime["direct_envelope_error"](code, code, runtime["HTTPStatus"].CONFLICT)
+        raise V6Error(code, code) from exc
     completion_requirements = _completion_requirements(envelope, route)
+    conceptual_turn = str(route["task_contract"].get("evidence_floor") or "") == "conceptual"
     answer_only = (
-        str(route["task_contract"].get("evidence_floor") or "") == "conceptual"
+        authority.request_class(route) in {"conversation", "general_conversation"}
+        and conceptual_turn
         and not completion_requirements
     )
     coherence = authority.coherence(route)
@@ -117,9 +127,10 @@ def execute_owned(
     objective = str(envelope.get("objective") or body.get("message") or "")
     compact_state = envelope.get("compact_state") if isinstance(envelope.get("compact_state"), dict) else {}
     raw_history = compact_state.get("transcript") if isinstance(compact_state.get("transcript"), list) else []
+    history_limit = int(execution_profile["history_turns"])
     history = [
         {"role": str(item.get("role") or "user"), "content": str(item.get("content") or "")[:600]}
-        for item in raw_history[-6:] if isinstance(item, dict)
+        for item in (raw_history[-history_limit:] if history_limit else []) if isinstance(item, dict)
         and str(item.get("role") or "") in {"user", "assistant"}
         and str(item.get("content") or "").strip()
     ]
@@ -148,6 +159,19 @@ def execute_owned(
         runtime["append_agent_run_event"](
             server, run_id, event_type, summary=summary[:500], payload={"protocol": "v6", **payload},
         )
+
+    run_trajectory = trajectory.create(
+        run_id=run_id, route_id=str(route.get("route_id") or ""),
+    )
+
+    def trajectory_sink(event: dict[str, Any]) -> None:
+        append("trajectory.event", str(event.get("kind") or "trajectory"), {"trajectory_event": event})
+
+    trajectory.append(
+        run_trajectory, kind="run.started", source="host.controller",
+        payload={"goal_sha256": trajectory.contracts.digest(objective), "profile": execution_profile["id"]},
+        sink=trajectory_sink,
+    )
 
     append("envelope.created", objective[:180], {"route_id": route.get("route_id")})
     append("route.resolved", str(route.get("route_id") or ""), {"route_contract": route})
@@ -193,6 +217,8 @@ def execute_owned(
     clients_payload = runtime["native_control_clients_payload"](server) if authority.CLIENT_UI_INSPECT in granted else {}
     clients = clients_payload.get("clients") if isinstance(clients_payload.get("clients"), list) else []
     live_clients = [item for item in clients if isinstance(item, dict) and item.get("live") is True]
+    active_client_manifest: dict[str, Any] = {}
+    active_client_topology: dict[str, Any] = {}
     if live_clients:
         client_ui_contract = route.get("client_ui") if isinstance(route.get("client_ui"), dict) else {}
         required_client_caps = {
@@ -200,19 +226,13 @@ def execute_owned(
             for operation in (client_ui_contract.get("operations") or [])
             if operation in client_ui_actions.CAPABILITIES
         }
-        selected = max(
-            enumerate(live_clients),
-            key=lambda pair: (
-                len(required_client_caps & {str(cap) for cap in (pair[1].get("capabilities") or [])}),
-                -pair[0],
-            ),
-        )[1]
-        manifest = {
-            "runtime_type": "electron", "client_id": selected.get("client_id"),
-            "capabilities": sorted(required_client_caps & {str(cap) for cap in (selected.get("capabilities") or [])}),
-            "widget_ids": [str(item) for item in (client_ui_contract.get("widget_ids") or [])[:32]],
-        }
-        v5_bridge.register_client(agent, manifest, invoke_v5)
+        manifests = [client_ui_actions.surface_manifest(item, client_ui_contract) for item in live_clients]
+        selected = client_topology.primary(manifests, required_client_caps)
+        topology = client_topology.projection(manifests, selected)
+        active_client_manifest = selected
+        active_client_topology = topology
+        ordered = [selected, *(item for item in manifests if item is not selected)]
+        v5_bridge.register_clients(agent, ordered, invoke_v5, topology=topology, topology_summary=client_topology.summary(topology))
     if mcp_bindings and callable(mcp_call):
         mcp_host.register(agent, mcp_bindings, lambda server_id, tool, args: mcp_call(server, user, route, server_id, tool, args))
 
@@ -240,15 +260,36 @@ def execute_owned(
             initial_state = agent.restore(saved.get("kernel") if isinstance(saved.get("kernel"), dict) else {})
             initial_discovered = {str(item) for item in (saved.get("discovered") or [])}
             objective = str(initial_state.get("goal") or objective)
+            parent_trajectory = saved.get("trajectory") if isinstance(saved.get("trajectory"), dict) else None
+            if parent_trajectory:
+                trajectory.verify(parent_trajectory)
+                run_trajectory["parent"] = {
+                    "run_id": str(parent_trajectory.get("run_id") or previous_run_id),
+                    "head": str(parent_trajectory.get("head") or ""),
+                    "count": int(parent_trajectory.get("count") or 0),
+                }
+            trajectory.append(
+                run_trajectory, kind="run.resumed", source="checkpoint",
+                payload={"source_run_id": previous_run_id, "source_head": str((parent_trajectory or {}).get("head") or "")},
+                sink=trajectory_sink,
+            )
             append("state.writeback", "resumed V6 checkpoint", {"source_run_id": previous_run_id})
         except persistence.PersistenceError as exc:
             runtime["direct_envelope_error"](exc.code, str(exc), runtime["HTTPStatus"].CONFLICT)
             raise V6Error(exc.code, str(exc)) from exc
-    elif authority.request_class(route) == "client_action":
+    elif authority.request_class(route) in {"client_action", "client_state", "runtime_inspection"}:
+        initial_discovered.update(capability_routing.initial_client_capabilities(
+            agent.catalog, topology=active_client_topology,
+        ))
+    if agent.catalog.get("client.environment.inspect") is not None:
+        initial_discovered.add("client.environment.inspect")
+    if authority.request_class(route) == "model_decision":
         initial_discovered.update(
             str(item.get("id") or "")
             for item in agent.catalog.all().values()
-            if str(item.get("authority") or "") in {authority.CLIENT_UI_INSPECT, authority.CLIENT_UI_CONTROL}
+            if str(item.get("authority") or "") == authority.REPO_READ
+            and str(item.get("kind") or "") == "observe"
+            and str(item.get("mode") or "") == "read"
         )
 
     route_evidence = agent.evidence.put(
@@ -260,7 +301,7 @@ def execute_owned(
         detail={"route_id": route.get("route_id"), "checks": check_ids, "allowed_edit_operations": edit_operations},
     )
     prior_terminal = None
-    if answer_only:
+    if conceptual_turn:
         assistant_content = next((item["content"] for item in reversed(history) if item["role"] == "assistant"), "")
         prior_terminal = persistence.latest_terminal_evidence(
             runtime["auth_connect"], user_id=principal, session_id=session_id,
@@ -282,14 +323,21 @@ def execute_owned(
             )
 
     usages: list[dict[str, Any]] = []
+    provider_attempts = 0
     checkpoint_ref: dict[str, Any] = {}
 
     def persist(current: dict[str, Any], discovered: set[str], reason: str) -> None:
         nonlocal checkpoint_ref
         checkpoint_started = perf.monotonic()
+        trajectory.append(
+            run_trajectory, kind="checkpoint.saved", source="host.checkpoint",
+            payload={"reason": str(reason)[:80], "state_id": str(current.get("id") or ""), "discovered": len(discovered)},
+            sink=trajectory_sink,
+        )
         snapshot = {
             "schema": persistence.SNAPSHOT_SCHEMA, "kernel": agent.snapshot(current),
             "discovered": sorted(discovered), "reason": str(reason)[:80],
+            "trajectory": trajectory.checkpoint(run_trajectory),
         }
         try:
             checkpoint_ref = persistence.save(
@@ -309,13 +357,48 @@ def execute_owned(
         initial_state = working_state.apply(initial_state, working_state.delta(initial_state, add_known=new_evidence_ids))
     persist(initial_state, initial_discovered, "run_started")
 
-    def complete(messages: list[dict[str, str]], tools: list[dict[str, Any]], index: int) -> dict[str, Any]:
-        inference_id = hashlib.sha256(f"{run_id}:{index}".encode()).hexdigest()
+    procedure_status: dict[str, Any] = {}
+    procedure_result: dict[str, Any] | None = None
+    if procedure_memory.enabled() and not should_resume and authority.request_class(route) in {"client_state", "runtime_inspection"}:
+        try:
+            recalled = procedure_memory.lookup(
+                runtime["auth_connect"], user_id=principal, route=route, objective=objective,
+                topology=active_client_topology, catalog=agent.catalog,
+            )
+            if recalled:
+                procedure_result = procedure_memory.replay(
+                    runtime["auth_connect"], recalled, agent=agent, objective=objective,
+                )
+                procedure_status = {
+                    "state": "replayed" if procedure_result else "pruned",
+                    "objective_sha256": recalled["objective_sha256"],
+                    "capability": recalled["capability_id"],
+                }
+                append("semantic.decision", "exact procedure replay", {"procedure_memory": procedure_status})
+                if procedure_result:
+                    append("gate.decision", "fresh procedure proof", {
+                        "status": "terminal_result", "procedure_memory": procedure_status,
+                    })
+        except Exception as exc:
+            procedure_status = {"state": "unavailable", "code": str(getattr(exc, "code", "") or type(exc).__name__)[:120]}
+            append("semantic.decision", "procedure memory unavailable", {"procedure_memory": procedure_status})
+
+    def provider_complete(
+        messages: list[dict[str, str]], tools: list[dict[str, Any]], index: int, *,
+        stage: str, tool_choice: str = "auto", max_output_tokens: int | None = None,
+    ) -> dict[str, Any]:
+        nonlocal provider_attempts
+        provider_attempts += 1
+        inference_id = hashlib.sha256(f"{run_id}:{stage}:{provider_attempts}".encode()).hexdigest()
         proxy_body = {
             **body, "provider_config": runtime["provider_config_for_proxy_body"](body),
-            "messages": messages, "tools": tools, "tool_choice": "auto",
+            "messages": messages, "tools": tools, "tool_choice": tool_choice,
+            "reasoning_effort": reasoning.effort(body.get("reasoning_effort") or body.get("reasoningEffort")),
             "parallel_tool_calls": False, "_timeout_sec": budget.provider_call_ms(route) / 1000,
         }
+        if max_output_tokens is not None:
+            proxy_body["max_tokens"] = max(1, int(max_output_tokens))
+            proxy_body["max_output_tokens"] = max(1, int(max_output_tokens))
         provider_call = perf.provider_started(proxy_body, index)
         provider_ok = False
         try:
@@ -329,12 +412,15 @@ def execute_owned(
         usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
         usages.append(usage)
         runtime["append_envelope_v2_inference_usage"](
-            server, run_id, result=result, turn_id=turn_id, inference_id=inference_id, stage="v6.loop",
+            server, run_id, result=result, turn_id=turn_id, inference_id=inference_id, stage=stage,
         )
         runtime["record_agent_run_token_usage_event"](
             server, run_id, {"route_id": route.get("route_id"), "usage": usage},
         )
         return result
+
+    def complete(messages: list[dict[str, str]], tools: list[dict[str, Any]], index: int) -> dict[str, Any]:
+        return provider_complete(messages, tools, index, stage="v6.loop")
 
     def loop_event(event: dict[str, Any]) -> None:
         event_type = str(event.get("type") or "")
@@ -342,8 +428,32 @@ def execute_owned(
             append(event_type, f"decision {event.get('decision')}", event)
         elif event_type == "llm.context.measured":
             append("turn.usage.updated", f"decision {event.get('decision')} context measured", {"context": event})
+        elif event_type == "trajectory.context":
+            trajectory.append(
+                run_trajectory, kind="context.projected", source="v6.context",
+                payload=trajectory.context_payload(
+                    event.get("messages") if isinstance(event.get("messages"), list) else [],
+                    event.get("tools") if isinstance(event.get("tools"), list) else [],
+                    decision=int(event.get("decision") or 0), profile=str(event.get("profile") or execution_profile["id"]),
+                ), sink=trajectory_sink,
+            )
+        elif event_type == "trajectory.model":
+            trajectory.append(
+                run_trajectory, kind="model.completed", source="provider",
+                payload={"decision": int(event.get("decision") or 0), "result": event.get("result") if isinstance(event.get("result"), dict) else {}},
+                sink=trajectory_sink,
+            )
         elif event_type == "decision.completed":
             append("semantic.decision", str(event.get("tool") or "decision"), event)
+            trajectory.append(
+                run_trajectory, kind="decision.completed", source="v6.controller",
+                payload={key: value for key, value in event.items() if key != "type"}, sink=trajectory_sink,
+            )
+            if event.get("tool"):
+                trajectory.append(
+                    run_trajectory, kind="tool.completed", source=f"tool:{event.get('tool')}",
+                    payload={key: value for key, value in event.items() if key != "type"}, sink=trajectory_sink,
+                )
         elif event_type == "commentary":
             commentary_sink({
                 "schema": "master.frontier.v6.commentary.v1", "authored_by": "model",
@@ -361,26 +471,93 @@ def execute_owned(
                 "missing": debug_stall.missing,
             })
             raise debug_stall
-        result = controller.run(
+        result = procedure_result or controller.run(
             objective, agent, complete, emit=loop_event,
             cancelled=lambda: run_control.requested(run_id),
             initial_state=initial_state, initial_discovered=initial_discovered,
             checkpoint=persist, history=history,
             tools=[] if answer_only else controller.TOOLS,
+            max_decisions=budget.decision_limit(route, int(execution_profile["max_decisions"])),
+            execution_profile=str(execution_profile["id"]),
+            diagnostic_context={
+                "route_id": route.get("route_id"), "surface": route.get("surface"),
+                "active_client": active_client_manifest,
+                "client_environment": active_client_topology,
+            },
+            final_contract_required=(
+                str(route["task_contract"].get("finalization_contract") or "") == "claim_bound"
+            ),
+            evidence_floor=str(route["task_contract"].get("evidence_floor") or "route"),
         )
     except controller.ControllerError as exc:
         code = exc.code
         message = str(exc)
-        terminal_status = "cancelled" if code == "v6_run_cancelled" else "interrupted"
-        runtime["finish_agent_run"](server, run_id, status=terminal_status, error={
-            "code": code, "message": message, "phase": exc.phase,
-            "missing": exc.missing, "resume_checkpoint": checkpoint_ref,
-        })
-        runtime["direct_envelope_error"](code, message, runtime["HTTPStatus"].CONFLICT)
-        raise V6Error(code, message) from exc
+        if code == "v6_no_semantic_progress" and exc.diagnostic and exc.terminal:
+            diagnostic_index = provider_attempts + 1
+            diagnostic_messages = stall_diagnostic.messages(exc.diagnostic)
+            append("llm.inference.started", "stall diagnostic", {
+                "decision": diagnostic_index, "phase": "stall_diagnostic",
+            })
+            trajectory.append(
+                run_trajectory, kind="context.projected", source="v6.stall_diagnostic",
+                payload=trajectory.context_payload(
+                    diagnostic_messages, [], decision=diagnostic_index, profile="stall_diagnostic",
+                ), sink=trajectory_sink,
+            )
+            provider_failure = ""
+            raw_diagnostic: dict[str, Any] = {}
+            try:
+                raw_diagnostic = provider_complete(
+                    diagnostic_messages, [], diagnostic_index,
+                    stage="v6.stall_diagnostic", tool_choice="none",
+                    max_output_tokens=stall_diagnostic.MAX_OUTPUT_TOKENS,
+                )
+                trajectory.append(
+                    run_trajectory, kind="model.completed", source="provider.stall_diagnostic",
+                    payload={"decision": diagnostic_index, "result": raw_diagnostic}, sink=trajectory_sink,
+                )
+            except Exception as diagnostic_exc:
+                provider_failure = str(getattr(diagnostic_exc, "code", "") or "stall_diagnostic_provider_failed")[:160]
+            synthesized = stall_diagnostic.interpret(
+                raw_diagnostic, exc.diagnostic, failure_code=provider_failure,
+            )
+            diagnostic_event = {
+                "decision": diagnostic_index, "phase": exc.phase,
+                "missing": exc.missing, "model_valid": synthesized["model_valid"],
+                "hypotheses": synthesized["hypotheses"], "next_check": synthesized["next_check"],
+                **({"provider_error": provider_failure} if provider_failure else {}),
+            }
+            append("llm.inference.completed", "stall diagnostic", diagnostic_event)
+            append("semantic.decision", "stall diagnostic closeout", diagnostic_event)
+            append("gate.decision", "diagnostic closeout", {"status": "blocked", **diagnostic_event})
+            trajectory.append(
+                run_trajectory, kind="decision.completed", source="v6.stall_diagnostic",
+                payload=diagnostic_event, sink=trajectory_sink,
+            )
+            result = {
+                "ok": True, "schema": "master.frontier.v6.controller.v1",
+                "answer": synthesized["answer"], "state": exc.terminal["state"],
+                "trace": exc.terminal["trace"], "evidence": exc.terminal["evidence"],
+                "diagnostic_closeout": {
+                    "schema": synthesized["schema"], "phase": exc.phase,
+                    "missing": exc.missing, "model_valid": synthesized["model_valid"],
+                    "hypotheses": synthesized["hypotheses"], "next_check": synthesized["next_check"],
+                    **({"provider_error": provider_failure} if provider_failure else {}),
+                },
+            }
+        else:
+            terminal_status = "cancelled" if code == "v6_run_cancelled" else "interrupted"
+            trajectory.append(run_trajectory, kind="run.interrupted", source="host.controller", payload={"code": code, "phase": exc.phase, "missing": exc.missing}, sink=trajectory_sink)
+            runtime["finish_agent_run"](server, run_id, status=terminal_status, error={
+                "code": code, "message": message, "phase": exc.phase,
+                "missing": exc.missing, "resume_checkpoint": checkpoint_ref,
+            })
+            runtime["direct_envelope_error"](code, message, runtime["HTTPStatus"].CONFLICT)
+            raise V6Error(code, message) from exc
     except Exception as exc:
         code = str(getattr(exc, "code", "") or "v6_provider_interrupted")
         message = str(getattr(exc, "message", "") or str(exc) or code)[:500]
+        trajectory.append(run_trajectory, kind="run.interrupted", source="host.controller", payload={"code": code, "message": message}, sink=trajectory_sink)
         runtime["finish_agent_run"](
             server, run_id, status="interrupted",
             error={"code": code, "message": message, "resume_checkpoint": checkpoint_ref},
@@ -389,18 +566,37 @@ def execute_owned(
         raise V6Error(code, message) from exc
 
     journal = agent.journal()
+    if procedure_memory.enabled() and provider_attempts > 0 and authority.request_class(route) in {"client_state", "runtime_inspection"}:
+        try:
+            observed_procedure = procedure_memory.observe_success(
+                runtime["auth_connect"], user_id=principal, route=route, objective=objective,
+                topology=active_client_topology, run_id=run_id, journal=journal, catalog=agent.catalog,
+            )
+            if observed_procedure:
+                procedure_status = observed_procedure
+                append("state.writeback", "procedure memory observed", {"procedure_memory": procedure_status})
+        except Exception as exc:
+            procedure_status = {"state": "unavailable", "code": str(getattr(exc, "code", "") or type(exc).__name__)[:120]}
+            append("state.writeback", "procedure memory unavailable", {"procedure_memory": procedure_status})
     changed_files = _changed_files(journal)
+    trajectory.append(run_trajectory, kind="run.completed", source="host.controller", payload={"answer_sha256": trajectory.contracts.digest(result["answer"]), "state_id": result["state"].get("id"), "evidence_count": len(result["evidence"])}, sink=trajectory_sink)
     final = {
         "schema": "hermes.wasm_agent.master_frontier.final.v6", "protocol": "v6",
         "run_id": run_id, "turn_id": turn_id, "route_id": route.get("route_id"),
         "reply": result["answer"], "state": result["state"], "evidence": result["evidence"],
         "diagnostics": {
-            "provider_calls": len(usages), "token_usage": usages,
-            "token_usage_total": _usage_total(usages, len(usages)),
+            "provider_calls": provider_attempts, "provider_successes": len(usages), "token_usage": usages,
+            "token_usage_total": _usage_total(usages, provider_attempts),
+            "reasoning_effort": reasoning.effort(body.get("reasoning_effort") or body.get("reasoningEffort")),
             "context": [item.get("context") for item in result.get("trace") or []],
             "completion_gaps": [*agent.completion_gaps(), *[f"goal:{item.get('id')}" for item in result["state"].get("goals", []) if item.get("status") != "satisfied"]],
             "resume_checkpoint": checkpoint_ref,
             "performance": perf.snapshot(),
+            "execution_profile": execution_profile,
+            "procedure_memory": procedure_status,
+            **({"final_claims": result["final_claims"]} if result.get("final_claims") else {}),
+            "trajectory": {"head": run_trajectory["head"], "count": run_trajectory["count"], "parent": run_trajectory.get("parent")},
+            **({"stall_diagnostic": result["diagnostic_closeout"]} if result.get("diagnostic_closeout") else {}),
         },
         "changed_files": changed_files,
         "local_tools": [{
@@ -408,7 +604,10 @@ def execute_owned(
             "status": (item.get("receipt") or {}).get("state"), "ok": (item.get("receipt") or {}).get("ok"),
         } for item in journal],
     }
-    append("answer.final", "answer complete", {"evidence_count": len(result["evidence"])})
+    append("answer.final", "answer complete", {
+        "evidence_count": len(result["evidence"]),
+        "claim_count": len((result.get("final_claims") or {}).get("claims") or []),
+    })
     finished = runtime["finish_agent_run"](server, run_id, status="completed", final=final) or {}
     integrity = finished.get("integrity_proof") if isinstance(finished, dict) else None
     return {**final, "run": run_record, **({"integrity_proof": integrity} if isinstance(integrity, dict) else {})}

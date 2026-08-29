@@ -71,6 +71,7 @@ import app_config as wasm_agent_app_config
 import live_clients as wasm_agent_live_clients
 import native_control_auth as wasm_agent_native_control_auth
 import native_control_receipts as wasm_agent_native_control_receipts
+import native_control_result_store as wasm_agent_native_control_result_store
 import property_photo_edit
 import synthetic_canary
 
@@ -6195,7 +6196,7 @@ def direct_head_hermes_dispatch_prompt(action: dict[str, Any], envelope: dict[st
         "refs": direct_envelope_redact(refs),
         "proof": direct_envelope_redact(proof),
         "stream": bool(action.get("stream") or action.get("STREAM")),
-        "route_contract": workspace,
+        "route_contract": master_frontier_dispatch.prompt_workspace_contract(workspace),
     }
     return (
         "Direct-head requested Hermes capability dispatch. Act only within the listed CAPS, "
@@ -14003,35 +14004,14 @@ def create_native_control_command(
 
 def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHandler) -> dict[str, Any]:
     query = parse_qs(urlparse(handler.path).query)
-    device_id = native_device_id_from_value((query.get("device_id") or ["unknown"])[0])
-    build_id = clipped_verbatim(str((query.get("build_id") or [""])[0]), 120)
-    route = clipped_verbatim(str((query.get("route") or [""])[0]), 600)
-    runtime_type = clipped_verbatim(str((query.get("runtime_type") or [handler.headers.get("X-Wasm-Agent-Native-Runtime", "")])[0]), 40)
-    platform = clipped_verbatim(str((query.get("platform") or [""])[0]), 40)
-    app_version = clipped_verbatim(str((query.get("app_version") or [""])[0]), 40)
-    title = clipped_verbatim(str((query.get("title") or [""])[0]), 160)
-    visibility = clipped_verbatim(str((query.get("visibility") or [""])[0]), 20)
-    space_id = clipped_verbatim(str((query.get("space_id") or [""])[0]), 120)
-    space_name = clipped_verbatim(str((query.get("space_name") or [""])[0]), 160)
-    capabilities = clipped_verbatim(str((query.get("capabilities") or [""])[0]), 3000).split(",")
     now = iso_timestamp()
-    heartbeat = {
-        "ok": True,
-        "schema": "hermes.wasm_agent.native_control_heartbeat.v1",
-        "device_id": device_id,
-        "build_id": build_id,
-        "route": route,
-        "runtime_type": runtime_type,
-        "platform": platform,
-        "app_version": app_version,
-        "title": title,
-        "visibility": visibility,
-        "space_id": space_id,
-        "space_name": space_name,
-        "capabilities": capabilities,
-        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
-        "received_at": now,
-    }
+    heartbeat = wasm_agent_live_clients.heartbeat_from_query(
+        query,
+        native_runtime=str(handler.headers.get("X-Wasm-Agent-Native-Runtime", "")),
+        remote_addr=str(handler.client_address[0] if handler.client_address else ""),
+        received_at=now,
+    )
+    device_id = heartbeat["device_id"]
     root = native_control_dir(server)
     write_json_file(root / "heartbeats" / f"{device_id}.json", heartbeat)
     wasm_agent_live_clients.save_client(server.state_dir, heartbeat)
@@ -14041,63 +14021,14 @@ def poll_native_control_commands(server: WasmAgentServer, handler: WasmAgentHand
 
 
 def save_native_control_result(server: WasmAgentServer, body: dict[str, Any], handler: WasmAgentHandler) -> dict[str, Any]:
-    if not isinstance(body, dict):
-        raise BrowserError("invalid_native_control_result", "Native control result payload must be an object.")
-    device_id = native_device_id_from_value(body.get("device_id") or handler.headers.get("X-Wasm-Agent-Native-Device-Id"))
-    command_id = safe_state_id(str(body.get("command_id") or "unknown"), "unknown")
-    now = iso_timestamp()
-    result = {
-        "ok": True,
-        "schema": "hermes.wasm_agent.native_control_result.v1",
-        "device_id": device_id,
-        "command_id": command_id,
-        "received_at": now,
-        "remote_addr": clipped_verbatim(str(handler.client_address[0] if handler.client_address else ""), 120),
-        "result": redact_native_diagnostics(body.get("result") if isinstance(body.get("result"), dict) else body),
-    }
-    root = native_control_dir(server)
-    write_json_file(root / "results" / device_id / f"{command_id}.json", result)
-    command_path = resolve_native_control_command_path(server, device_id, command_id)
-    command = read_json_file(command_path, {})
-    if isinstance(command, dict) and command:
-        command["status"] = "finished"
-        command["finished_at"] = now
-        command["result"] = result["result"]
-        write_json_file(command_path, command)
-        observability_hub = getattr(server, "observability_hub", None)
-        if observability_hub is not None:
-            observability_hub.record_command(command, status="finished", result=result["result"])
-    else:
-        observability_hub = getattr(server, "observability_hub", None)
-        if observability_hub is not None:
-            observability_hub.record_command(
-                {"id": command_id, "device_id": device_id, "type": body.get("command_type") or "unknown", "payload": {}},
-                status="finished",
-                result=result["result"],
-            )
-    observability_hub = getattr(server, "observability_hub", None)
-    if observability_hub is not None:
-        observability_hub.record_event(
-            device_id,
-            "native.control",
-            "command_result",
-            {
-                "command_id": command_id,
-                "op": clipped_verbatim(str(body.get("command_type") or (command.get("type") if isinstance(command, dict) else "") or "unknown"), 80),
-                "status": "finished",
-                "result": result["result"],
-            },
-        )
-    append_native_control_audit(server, {
-        "action": "command_result",
-        "device_id": device_id,
-        "command_id": command_id,
-        "command_type": clipped_verbatim(str(body.get("command_type") or (command.get("type") if isinstance(command, dict) else "") or "unknown"), 80),
-        "result_ok": bool(result["result"].get("ok")) if isinstance(result.get("result"), dict) else None,
-        "result": result["result"],
-        "remote_addr": result["remote_addr"],
-    })
-    return {"ok": True, "stored": True, "deviceId": device_id, "commandId": command_id, "receivedAt": now}
+    return wasm_agent_native_control_result_store.save_result(
+        server, body, handler, browser_error=BrowserError, device_id_from_value=native_device_id_from_value,
+        safe_state_id=safe_state_id, iso_timestamp=iso_timestamp, clipped_verbatim=clipped_verbatim,
+        redact_diagnostics=redact_native_diagnostics, control_dir=native_control_dir,
+        write_json_file=write_json_file, resolve_command_path=resolve_native_control_command_path,
+        read_json_file=read_json_file, apply_command_result_surface=wasm_agent_live_clients.apply_command_result_surface,
+        append_audit=append_native_control_audit,
+    )
 
 
 def native_control_clients_payload(server: WasmAgentServer) -> dict[str, Any]:

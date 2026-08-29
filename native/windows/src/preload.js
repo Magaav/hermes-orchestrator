@@ -1,17 +1,35 @@
 const { contextBridge, ipcRenderer } = require("electron");
+const COMPANION_ACTIVE = process.argv.includes("--wasm-agent-companion-overlay=1");
+
+if (COMPANION_ACTIVE) {
+  const markCompanionDocument = () => {
+    if (!document.documentElement) return false;
+    document.documentElement.dataset.wasmAgentCompanion = "true";
+    return true;
+  };
+  if (!markCompanionDocument()) {
+    const observer = new MutationObserver(() => {
+      if (markCompanionDocument()) observer.disconnect();
+    });
+    observer.observe(document, { childList: true });
+  }
+}
 
 contextBridge.exposeInMainWorld("wasmAgentNative", {
   platform: "windows",
   runtime: "electron",
   nativeDesktop: true,
-  webSurfaces: {
-    invoke: (operation, args = {}) => ipcRenderer.invoke("wasm-agent:web-surface", { operation, args }),
-    onEvent: (callback) => {
-      if (typeof callback !== "function") return () => {};
-      const handler = (_event, payload) => callback(payload || {});
-      ipcRenderer.on("wasm-agent:web-surface-event", handler);
-      return () => ipcRenderer.removeListener("wasm-agent:web-surface-event", handler);
-    },
+  companion: {
+    active: COMPANION_ACTIVE,
+    setMode: (value = {}) => ipcRenderer.invoke("wasm-agent:companion-window", { operation: "set_mode", ...value }),
+    configureTopmost: (value = {}) => ipcRenderer.invoke("wasm-agent:companion-window", { operation: "configure_topmost", ...value }),
+    beginMove: (value = {}) => ipcRenderer.send("wasm-agent:companion-window-move", { operation: "begin", ...value }),
+    updateMove: (value = {}) => ipcRenderer.send("wasm-agent:companion-window-move", { operation: "update", ...value }),
+    moveBy: (delta = {}) => ipcRenderer.send("wasm-agent:companion-window-move", { x: Number(delta.x) || 0, y: Number(delta.y) || 0 }),
+    endMove: (value) => value && typeof value.moved === "boolean"
+      ? ipcRenderer.send("wasm-agent:companion-window-move", { operation: "end", ...value })
+      : ipcRenderer.invoke("wasm-agent:companion-window", { operation: "end_move" }),
+    status: () => ipcRenderer.invoke("wasm-agent:companion-window", { operation: "status" }),
   },
   nativeDiagnostics: {
     run: (operation, payload) => ipcRenderer.invoke(

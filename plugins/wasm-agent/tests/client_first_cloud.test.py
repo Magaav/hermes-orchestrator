@@ -372,6 +372,30 @@ class ClientFirstCloudTest(unittest.TestCase):
             self.assertIn("finished_at", updated)
             self.assertTrue(updated["result"]["ok"])
 
+    def test_space_open_result_advances_live_client_surface_before_next_command(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp)
+            device_id = "electron-renderer-a"
+            command_id = "cmd-space-open"
+            static_server.wasm_agent_live_clients.save_client(state, {
+                "device_id": device_id, "runtime_type": "electron", "received_at": "2026-08-25T12:00:00Z",
+                "space_id": "home", "space_name": "space-home", "widget_manifest": "active-surface-v1", "widget_ids": [],
+            })
+            command_path = state / "native-control" / "commands" / device_id / f"{command_id}.json"
+            command_path.parent.mkdir(parents=True)
+            command_path.write_text(json.dumps({
+                "id": command_id, "device_id": device_id, "type": "space_open", "status": "delivered",
+            }), encoding="utf-8")
+            static_server.save_native_control_result(SimpleNamespace(state_dir=state), {
+                "device_id": device_id, "command_id": command_id, "result": {
+                    "ok": True, "space_id": "admin", "space_name": "space-admin",
+                    "surface": {"manifest": "active-surface-v1", "space_id": "admin", "space_name": "space-admin", "widget_ids": ["browser"]},
+                },
+            }, SimpleNamespace(headers={}, client_address=("127.0.0.1", 45678)))
+            client = static_server.wasm_agent_live_clients.list_clients(state)["clients"][0]
+            self.assertEqual(client["space_id"], "admin")
+            self.assertEqual(client["widget_ids"], ["browser"])
+
     def test_wake_word_state_uses_latest_voice_wake_packet_when_boot_trace_is_latest(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             server = SimpleNamespace(state_dir=Path(tmp))

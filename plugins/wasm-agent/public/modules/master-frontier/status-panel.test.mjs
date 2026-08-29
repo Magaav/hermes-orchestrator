@@ -4,7 +4,38 @@ import fs from "node:fs";
 
 const source = fs.readFileSync(new URL("./status-panel.js", import.meta.url), "utf8");
 const moduleUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`;
-const { masterFrontierStatusModel, mergeMasterFrontierStatusUsage, mergeMasterFrontierSessionStatusDiagnostics } = await import(moduleUrl);
+const {
+  masterFrontierReasoningEffort,
+  masterFrontierRequestPreferences,
+  masterFrontierStatusModel,
+  mergeMasterFrontierStatusUsage,
+  mergeMasterFrontierSessionStatusDiagnostics,
+  setMasterFrontierReasoningEffort,
+} = await import(moduleUrl);
+
+test("reasoning preference defaults to light and is hot configurable", () => {
+  const values = new Map();
+  const storage = {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, value),
+  };
+  assert.equal(masterFrontierReasoningEffort(storage), "low");
+  assert.deepEqual(masterFrontierRequestPreferences(storage), { reasoning_effort: "low", text_verbosity: "low" });
+  assert.equal(setMasterFrontierReasoningEffort("xhigh", storage), "xhigh");
+  assert.equal(masterFrontierReasoningEffort(storage), "xhigh");
+  assert.equal(setMasterFrontierReasoningEffort("unsupported", storage), "low");
+});
+
+test("status reports the effective reasoning effort", () => {
+  const model = masterFrontierStatusModel({ diagnostics: { reasoning_effort: "high" }, reasoningEffort: "xhigh" });
+  assert.equal(model.reasoningEffort, "xhigh");
+  assert.equal(model.effectiveReasoningEffort, "high");
+});
+
+test("status uses the product dropdown component", () => {
+  assert.match(source, /element\(document, "s-select", "codex-status__reasoning"\)/);
+  assert.doesNotMatch(source, /element\(document, "select", "codex-status__reasoning"\)/);
+});
 
 test("builds exact Codex-style context and weekly status from diagnostics", () => {
   const model = masterFrontierStatusModel({

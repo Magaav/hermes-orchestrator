@@ -10,6 +10,7 @@ Environment=PYTHONPATH=/local/labs/wasm-agent
 Environment=HERMES_WASM_AGENT_FRONTIER_PROVIDER=codex_subscription
 Environment=MF5_CODEX_MODEL=gpt-5.6-luna
 Environment=FRONTIER_MODEL=chatgpt/codex-subscription:gpt-5.6-luna
+ExecStartPre=/usr/bin/node plugins/wasm-agent/scripts/generate-module-release.mjs --check
 ExecStart=/bin/bash -lc 'source plugins/wasm-agent/scripts/deployment_env.sh; wasm_agent_load_deployment_env plugins/wasm-agent/conf/wa.env; exec python3 plugins/wasm-agent/server/static_server.py --host 127.0.0.1 --port 8878 --bridge-url http://127.0.0.1:8790'
 Restart=on-failure
 RestartSec=2

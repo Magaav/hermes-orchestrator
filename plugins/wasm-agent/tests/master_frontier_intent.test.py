@@ -44,6 +44,14 @@ class MasterFrontierIntentTests(unittest.TestCase):
         self.assertTrue(intent.objective_is_declared_client_action(envelope))
         self.assertTrue(intent.objective_is_declared_client_state_query(envelope))
 
+    def test_negated_browser_actions_do_not_grant_mutation_intent(self) -> None:
+        envelope = self.envelope(
+            "Inspect the current browser runtime. Do not navigate, click, type, or modify anything."
+        )
+        envelope["route_contract"] = {"client_ui": {"operations": ["windows_browser_cdp_runtime_inspect"]}}
+
+        self.assertFalse(intent.objective_is_declared_client_action(envelope))
+
     def test_explicit_widget_build_request_requires_change_artifact(self) -> None:
         envelope = self.envelope("Go ahead and build the widget in the Realure space")
 

@@ -92,7 +92,6 @@ state, and product UI surfaces.
   keep UI, model selection, diagnostics, and policy in the shared runtime.
 - Frontier/control routes must stay authenticated, audited, command-correlated,
   and operation-based. Master:frontier is explicitly authorized to execute
-  arbitrary JavaScript in a selected native Browser `WebContentsView` and
   arbitrary commands as the installed Windows user through named full-power
   operations. Command semantics are not allowlisted. Payload/result byte caps,
   timeouts, provenance, and audit receipts are transport/observability

@@ -24,9 +24,6 @@ runtime:
 firmware_modules:
   - id: dev-hmr
     path: public/modules/hmr/
-  - id: host-browser
-    path: public/modules/browser/
-    state_root: state/browser/
   - id: observation
     path: public/modules/observation/
     state_root: state/observation/

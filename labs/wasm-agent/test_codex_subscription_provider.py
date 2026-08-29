@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
+import subprocess
+import sys
+import time
 import unittest
 from unittest import mock
 
@@ -8,6 +11,59 @@ import codex_subscription_provider as provider
 
 
 class CodexSubscriptionProviderTests(unittest.TestCase):
+    def test_decision_thread_rotation_is_bounded(self) -> None:
+        self.assertFalse(provider.decision_thread_rotation_due(3))
+        self.assertTrue(provider.decision_thread_rotation_due(4))
+
+    def test_rotation_starts_fresh_thread_and_preserves_tool_contract(self) -> None:
+        worker = provider._AppServerWorker.__new__(provider._AppServerWorker)
+        worker.thread_params = {"model": "gpt-5.6-luna", "sandbox": "read-only"}
+        worker.thread_id = "old"
+        worker.turn_count = 4
+        worker.compaction_status = "completed"
+        worker.resumed = True
+        worker.fork_reason = ""
+        worker._send = mock.Mock(return_value=7)
+        worker._response = mock.Mock(return_value={"thread": {"id": "fresh"}})
+        worker._persist = mock.Mock()
+
+        worker._rotate_thread(123.0, "bounded_decision_turns")
+
+        self.assertEqual(worker.thread_id, "fresh")
+        self.assertEqual(worker.turn_count, 0)
+        self.assertEqual(worker.compaction_status, "none")
+        self.assertFalse(worker.resumed)
+        self.assertEqual(worker.fork_reason, "bounded_decision_turns")
+        worker._send.assert_called_once_with("thread/start", {
+            "model": "gpt-5.6-luna", "sandbox": "read-only", "ephemeral": False,
+            "serviceName": "wasm-agent-master-frontier",
+        })
+        worker._persist.assert_called_once()
+
+    def test_decision_thread_disables_codex_owned_capability_surfaces(self) -> None:
+        self.assertEqual(provider.DECISION_THREAD_ISOLATION, {
+            "dynamicTools": [],
+            "environments": [],
+            "selectedCapabilityRoots": [],
+            "personality": "none",
+        })
+        with mock.patch.dict(provider.os.environ, {"MF_CODEX_DECISION_THREAD_ISOLATION": "0"}):
+            self.assertEqual(provider.decision_thread_isolation(), {})
+
+    def test_initialize_negotiates_experimental_isolation_fields(self) -> None:
+        worker = provider._AppServerWorker.__new__(provider._AppServerWorker)
+        worker.notifications = []
+        worker._send = mock.Mock(side_effect=[1, 2])
+        worker._response = mock.Mock(side_effect=provider.CodexAppServerFailure("stop after initialize"))
+        with self.assertRaisesRegex(provider.CodexAppServerFailure, "stop after initialize"):
+            worker._initialize()
+        worker._send.assert_called_once_with("initialize", {
+            "clientInfo": {
+                "name": "wasm_agent_master_frontier", "title": "WASM Agent Master Frontier", "version": "6",
+            },
+            "capabilities": {"experimentalApi": True},
+        })
+
     def test_schema_limits_tool_names(self) -> None:
         schema = provider._schema(["search", "read"])
         name = schema["properties"]["tool_calls"]["items"]["properties"]["name"]
@@ -124,6 +180,31 @@ class CodexSubscriptionProviderTests(unittest.TestCase):
         worker._read = mock.Mock(side_effect=lambda _deadline: next(messages))
         self.assertEqual(worker._response(7, 1)["turn"]["id"], "turn-1")
         self.assertEqual(worker._notification(1)["method"], "item/completed")
+
+    def test_read_drains_multiple_json_lines_from_one_pipe_burst(self) -> None:
+        process = subprocess.Popen(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import sys,time; "
+                    "sys.stdout.buffer.write(b'{\\\"n\\\":1}\\n{\\\"n\\\":2}\\n'); "
+                    "sys.stdout.buffer.flush(); time.sleep(1)"
+                ),
+            ],
+            stdout=subprocess.PIPE,
+            bufsize=0,
+        )
+        worker = provider._AppServerWorker.__new__(provider._AppServerWorker)
+        worker.process = process
+        worker.stdout_buffer = bytearray()
+        try:
+            self.assertEqual(worker._read(time.monotonic() + 0.5), {"n": 1})
+            self.assertEqual(worker._read(time.monotonic() + 0.2), {"n": 2})
+        finally:
+            process.terminate()
+            process.wait(timeout=2)
+            process.stdout.close()
 
     def test_missing_app_server_executable_fails_without_alternate_transport(self) -> None:
         with mock.patch.object(provider, "resolve_codex_executable", return_value=""):

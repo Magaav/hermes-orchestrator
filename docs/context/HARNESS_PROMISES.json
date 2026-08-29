@@ -1,6 +1,6 @@
 {
   "schemaVersion": 1,
-  "updatedAt": "2026-08-21",
+  "updatedAt": "2026-08-28",
   "resultStatuses": [
     "pass",
     "fail",
@@ -24,6 +24,90 @@
     "thirdRepeat": "Promote the promise or record the missing primitive, access, or observability that blocks promotion."
   },
   "promises": [
+    {
+      "id": "native-control-receipt-budget-observable",
+      "owner": "plugins/wasm-agent/server/native_control_result_store.py",
+      "claim": "Every stored native-control result records exact UTF-8 compact-JSON bytes against a declared budget and emits typed observability and audit alerts on overflow without changing command success or truncating proof.",
+      "whenToUse": "After changing native-control result upload, redaction, receipt persistence, command result projection, or native default/detail response shapes.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/native_control_result_store.test.py"
+      ],
+      "timeoutSec": 10,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "resultBytes equals the exact UTF-8 byte length of the redacted compact JSON persisted as result",
+        "compact status and sync commands use declared small budgets while explicit detail or log requests use the diagnostic budget",
+        "an oversized result remains unchanged and successful while receiptBudget reports withinBudget false, exact overByBytes, and native_control_receipt_budget_exceeded",
+        "the result record, command record, upload response, command_result event, and command_result audit expose the compact receiptBudget counter",
+        "an exceeded budget additionally emits receipt_budget_exceeded observability and audit events"
+      ],
+      "outputArtifacts": [
+        "native-control result record receiptBudget",
+        "native.control receipt_budget_exceeded event",
+        "native-control audit receipt_budget_exceeded entry"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/native_control_result_store.py",
+        "plugins/wasm-agent/server/static_server.py",
+        "native/windows/src/main.js"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the exact command type, profile, resultBytes, budgetBytes, and overByBytes before changing a threshold.",
+        "Reduce the default projection at its capability owner; preserve explicit pull-on-demand detail."
+      ]
+    },
+    {
+      "id": "host-disk-health-bounded",
+      "owner": "tools/context",
+      "claim": "Root disk pressure and stale WASM Agent build or Git temporary artifacts are detected before they can silently exhaust the host filesystem.",
+      "whenToUse": "Every minute on the orchestrator host, before a rebuild-heavy operation, or when Git object storage or /tmp growth is suspected.",
+      "command": [
+        "python3",
+        "tools/context/check-disk-health.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "root filesystem usage is below 85 percent",
+        "no known Git tmp_pack or tmp_obj artifact remains after the five-minute active-operation safety window",
+        "no known WASM Agent installer, ASAR, or release temporary directory remains after the five-minute safety window",
+        "the compact result and full JSON report distinguish disk pressure, active Git maintenance, candidates, removals, and remaining artifacts"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/disk-health-result.json"
+      ],
+      "invalidatedBy": [
+        "tools/context/check-disk-health.py",
+        "tools/context/systemd/wasm-agent-disk-health.service",
+        "tools/context/systemd/wasm-agent-disk-health.timer",
+        "native/windows/scripts/verify-windows-installer.js"
+      ],
+      "nextSuggestedSteps": [
+        "Run with --cleanup only after inspecting activeGitMaintenance and the bounded candidate totals.",
+        "Inspect the logged producer before changing thresholds if Git temporary artifacts recur.",
+        "Stop rebuild-heavy work when disk usage reaches the 85 percent fail threshold."
+      ]
+    },
     {
       "id": "artifact-recipe-exact-vector",
       "owner": "plugins/wasm-agent/public/modules/artifact-foundry",
@@ -124,7 +208,7 @@
       ],
       "passRequires": [
         "the versioned result schema id is wasm-agent.product-readiness.result.v1",
-        "the exact ordered journeys are repository-agent, electron-browser-agent, and android-voice-agent",
+        "the exact ordered journeys are repository-agent and android-voice-agent",
         "every journey uses a canonical harness status and preserves typed underlying evidence",
         "evaluationCompleted remains separate from ready",
         "absent measurements remain null and are listed in missingMetrics",
@@ -148,7 +232,7 @@
     {
       "id": "wasm-agent-product-readiness-evaluation",
       "owner": "docs/context",
-      "claim": "Repository, Electron/browser, and Android voice journeys are normalized from their registered proof artifacts into one compact evaluation that keeps pass, failure, stale evidence, missing metrics, and typed blockers visible.",
+      "claim": "Repository and Android voice journeys are normalized from their registered proof artifacts into one compact evaluation that keeps pass, failure, stale evidence, missing metrics, and typed blockers visible.",
       "whenToUse": "Before making a broad wasm-agent readiness claim, after refreshing any canonical journey proof, or when choosing the next reusable reliability repair.",
       "command": [
         "python3",
@@ -168,7 +252,7 @@
         "production"
       ],
       "passRequires": [
-        "all three canonical journeys have an explicit canonical status even when runtime access or proof is missing",
+        "both canonical journeys have an explicit canonical status even when runtime access or proof is missing",
         "evidence newer than its registered invalidation sources is distinguished from historical or stale evidence",
         "required metrics absent from child artifacts remain null and are enumerated",
         "evaluation completion is recorded independently of product readiness",
@@ -198,9 +282,57 @@
       ]
     },
     {
+      "id": "master-frontier-v6-trajectory-dataflow",
+      "owner": "plugins/wasm-agent/server/master_frontier/v6",
+      "claim": "Master:frontier V6 records a canonical hash-linked trajectory containing every provider-visible context and tool contract with provenance and cost metadata, derives replay and checkpoint lineage from that stream, rejects tampering, normalizes versioned legacy tool arguments, exposes structured recoverable tool failures, and applies route-owned execution profiles without changing the stable four-tool provider surface.",
+      "whenToUse": "After changing V6 context assembly, controller decisions, provider tools, execution profiles, checkpoint persistence, resume/fork behavior, or trajectory events.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-v6-trajectory.py"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the hash-linked event chain verifies and rejects content tampering",
+        "replay reconstructs exact provider-visible messages and tool contracts",
+        "every context block reports source, digest, and character cost",
+        "tool failures remain structured and recoverable while legacy argument aliases normalize without ambiguity",
+        "minimal, semantic, and code_orchestrated profiles remain route-owned over the stable provider surface",
+        "checkpoint persistence round-trips the verified trajectory and a resumed child binds its parent head",
+        "the terminal result is derivable from the same event stream"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v6-trajectory-result.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/server/master_frontier/v6/controller.py",
+        "plugins/wasm-agent/server/master_frontier/v6/execution_profiles.py",
+        "plugins/wasm-agent/server/master_frontier/v6/persistence.py",
+        "plugins/wasm-agent/server/master_frontier/v6/tool_compat.py",
+        "plugins/wasm-agent/server/master_frontier/v6/trajectory.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_trajectory.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py",
+        "tools/context/prove-master-frontier-v6-trajectory.py"
+      ],
+      "nextSuggestedSteps": [
+        "Run the authenticated V6 canary after deployment before claiming production runtime readiness.",
+        "Inspect the first false dataflow check before changing prompts or context budgets."
+      ]
+    },
+    {
       "id": "master-frontier-v6-kernel-bounded",
       "owner": "plugins/wasm-agent/server/master_frontier/v6",
-      "claim": "Master:frontier V6 keeps the provider surface constant while capabilities scale out of prompt, projects a complete small read once as explicitly untrusted evidence, makes generic Browser JavaScript discoverable for page actions, keeps action loops within three provider calls in the deterministic fixture, preserves goal completion across resume, keeps large evidence behind bounded lenses, host-binds client identity, runs independent work concurrently, and does not replay a completed operation after snapshot restore.",
+      "claim": "Master:frontier V6 keeps the provider surface constant while capabilities scale out of prompt, projects only the declared default CDP alias initially while alternate realms remain discoverable, maps declared client-state objectives to runtime inspection, exposes the trusted active-realm capability map, and terminates proof-owned bounded reads or actions in one provider call, preserves reviewed authorization for unmarked writes, projects a complete small read once as explicitly untrusted evidence, preserves goal completion across resume, keeps large evidence behind bounded lenses, host-binds client identity, runs independent work concurrently, and does not replay a completed operation after snapshot restore.",
       "whenToUse": "After changing the V6 projection, controller tools, capability catalog, evidence store, operation ledger, snapshot restore, DAG scheduler, or V5 bridge.",
       "command": [
         "python3",
@@ -223,7 +355,11 @@
         "a complete small read is projected once as untrusted evidence and finishes the deterministic inspect fixture in three provider decisions without a detail turn",
         "bound client capabilities expose no model-supplied client identity while the trusted bridge retains the binding",
         "client-action completion remains blocked after observation or an unmarked setup write and clears only after a successful write receipt explicitly correlated to the goal",
-        "the deterministic Browser action fixture uses its preloaded unrestricted JavaScript capability directly, performs execute then answer with no discover turn, and completes within three provider calls",
+        "the deterministic Browser action fixture uses its preloaded proof-owned procedure capability directly, performs execute then answer with no discover turn, and completes within three provider calls",
+        "the native initial projection includes only browser_cdp_default while persistent and incognito remain catalog-discoverable",
+        "a structured client-state objective outranks a generic conversation default, requires fresh client inspection, and lets the model select a proof-owned terminal read from the trusted active realm in one provider call",
+        "a capability-owned bounded terminal action completes with proof in one provider call while an unmarked terminal write still requires review",
+        "provider context accounting exposes the provider input minus visible-projection estimate as non-exact transport overhead",
         "goal-correlated completion survives checkpoint restore so a continuation cannot repeat the completed action",
         "stable request records are measured as reusable on the second inference",
         "snapshot restore replays the prior receipt without invoking the executor again",
@@ -240,6 +376,243 @@
       "nextSuggestedSteps": [
         "Inspect the first failed invariant before changing any context threshold or concurrency limit.",
         "Do not infer production model quality or token savings from this structural proof; run the live comparative fixture after V6 route wiring."
+      ]
+    },
+    {
+      "id": "windows-hot-ops-sync-liveness",
+      "owner": "native/windows/src/main/hot-ops-sync-control.js",
+      "claim": "Downloaded hot-operation sync runs as one observable background lifecycle task, duplicate sync requests deduplicate, list_hot_operations remains immediately responsive while sync is unresolved, and running, stuck, completed, or failed state is compactly reported without occupying the native-control command lane.",
+      "whenToUse": "After changing Windows hot-op sync, native-control dispatch, list_hot_operations, downloaded operation activation, command watchdogs, or sync timeout handling.",
+      "command": [
+        "node",
+        "native/windows/src/main/hot-ops-sync-control.test.js"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": ["static", "behavioral"],
+      "passRequires": [
+        "sync returns accepted/running without awaiting network completion",
+        "a concurrent sync request deduplicates onto the active generation",
+        "list_hot_operations returns the installed snapshot while sync remains unresolved",
+        "an overdue lifecycle reports stuck without blocking list",
+        "late successful completion becomes completed with changed metadata"
+      ],
+      "outputArtifacts": ["command stdout/stderr"],
+      "invalidatedBy": [
+        "native/windows/src/main/hot-ops-sync-control.js",
+        "native/windows/src/main/hot-ops-sync-control.test.js",
+        "native/windows/src/main.js",
+        "native/windows/src/main/dispatcher-health.js"
+      ],
+      "nextSuggestedSteps": [
+        "Run installed-app sync followed immediately by list_hot_operations and require a responsive running or terminal lifecycle receipt."
+      ]
+    },
+    {
+      "id": "windows-hot-ops-catalog-budget",
+      "owner": "native/windows/src/main/hot-ops-catalog.js",
+      "claim": "The default Windows hot-operation catalog exposes compact operation identities without schemas, sync bundle history, or raw logs, while one exact operation can pull its full action and proof contract on demand.",
+      "whenToUse": "After changing hot-operation manifests, catalog/list projection, bridge heartbeat hot-op summaries, sync receipts, model-facing capability discovery, or native diagnostic log inclusion.",
+      "command": [
+        "node",
+        "native/windows/src/main/hot-ops-catalog.test.js"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": ["static", "behavioral"],
+      "passRequires": [
+        "large per-operation schemas do not inflate the default identity catalog",
+        "an exact operation reference returns one full manifest contract",
+        "unknown operations fail with hot_operation_missing",
+        "broad detail requests fail with hot_operation_reference_required",
+        "sync bundle/file history is reduced to bounded metadata and counters"
+      ],
+      "outputArtifacts": ["command stdout/stderr"],
+      "invalidatedBy": [
+        "native/windows/src/main/hot-ops-catalog.js",
+        "native/windows/src/main/hot-ops-catalog.test.js",
+        "native/windows/src/main.js",
+        "native/windows/src/main/hot-ops-sync-control.js"
+      ],
+      "nextSuggestedSteps": [
+        "Run the installed list_hot_operations summary and one exact-name detail lookup; compare receipt byte counts and require unchanged operation discovery."
+      ]
+    },
+    {
+      "id": "windows-bridge-status-budget",
+      "owner": "native/windows/src/main/bridge-status-projection.js",
+      "claim": "Windows bridge status and heartbeat defaults preserve routing, build, protocol, capability, runtime, kernel, and hot-op health while excluding duplicate nested state and raw audit logs; details and at most 20 logs are pull-on-demand.",
+      "whenToUse": "After changing get_bridge_status, native kernel/runtime status, device status or heartbeat events, bridge audit logs, capability discovery, or native-control preflight.",
+      "command": ["node", "native/windows/src/main/bridge-status-projection.test.js"],
+      "timeoutSec": 15,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["static", "behavioral"],
+      "passRequires": [
+        "default status remains below its byte budget with large nested diagnostics and logs",
+        "default status preserves required build, protocol, capability, kernel, runtime, and hot-op summary fields",
+        "full details require includeDetails true",
+        "logs require includeLogs true and are capped at 20",
+        "heartbeats contain no raw audit lines"
+      ],
+      "outputArtifacts": ["command stdout/stderr"],
+      "invalidatedBy": [
+        "native/windows/src/main/bridge-status-projection.js",
+        "native/windows/src/main/bridge-status-projection.test.js",
+        "native/windows/src/main.js",
+        "tools/windows/prove-hot-shell.py"
+      ],
+      "nextSuggestedSteps": [
+        "Compare installed compact status, explicit detail, and explicit log receipt sizes; require unchanged preflight behavior and a log-free heartbeat."
+      ]
+    },
+    {
+      "id": "windows-kernel-runtime-status-budget",
+      "owner": "native/windows/src/main/bridge-status-projection.js",
+      "claim": "Windows kernel and downloaded-runtime status preserve capability, active identity, hash, sync, stale, and file-count evidence by default without embedding file histories or raw logs; full histories and logs are independent pull-on-demand options.",
+      "whenToUse": "After changing get_native_kernel_status, sync/refresh_downloaded_runtime, runtime feed files, rollback metadata, native.runtime_sync events, or kernel/runtime proof consumers.",
+      "command": ["node", "native/windows/src/main/bridge-status-projection.test.js"],
+      "timeoutSec": 15,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["static", "behavioral"],
+      "passRequires": [
+        "default kernel status preserves supported capabilities and active identities within budget",
+        "default runtime sync reduces file history to fileCount",
+        "full kernel/runtime histories require includeDetails true",
+        "logs require includeLogs true and are capped at 20",
+        "runtime synchronization success/failure remains explicit"
+      ],
+      "outputArtifacts": ["command stdout/stderr"],
+      "invalidatedBy": [
+        "native/windows/src/main/bridge-status-projection.js",
+        "native/windows/src/main/bridge-status-projection.test.js",
+        "native/windows/src/main.js",
+        "tools/windows/prove-hot-shell.py",
+        "tools/doctor/wasm-agent-doctor.py"
+      ],
+      "nextSuggestedSteps": [
+        "Compare installed compact kernel/runtime receipts against explicit detail receipts and require unchanged hot-shell and doctor classification."
+      ]
+    },
+    {
+      "id": "windows-cdp-semantic-control",
+      "owner": "native/windows/ops/desktop",
+      "claim": "The V6-to-Windows CDP path preserves bounded semantic inspection lenses end to end, restricts read completion to explicit read requirements, exposes compact semantic target fingerprints, rejects an editable target unless its page target, live role/name, and owning DOM scope match the inspected contract, treats viewport geometry as diagnostic only, dispatches hit-tested native CDP mouse/key input, supports compound fill-plus-submit, evaluates assertions inside their declared scope, classifies dispatched-but-unproven procedures as commit_unknown, and accepts mutation completion only when separate action, observation, and independently evaluated outcome proof records all pass.",
+      "whenToUse": "After changing Windows CDP inspection, exact-text or CSS targeting, browser input dispatch, transaction settling, postcondition proof, hot-op manifests, or the V6 Windows browser capability map.",
+      "command": [
+        "node",
+        "native/windows/ops/desktop/windows-cdp-control.test.js"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "generated inspect and action expressions compile",
+        "exact text resolves a non-editable visible target instead of an input carrying the same value",
+        "click dispatches mouseMoved, mousePressed, and mouseReleased through CDP after hit testing",
+        "V6 query_text and query_selector arguments reach native control and their bounded matches remain in the model projection",
+        "a read-only lifecycle operation can satisfy an explicit lifecycle capability requirement but cannot satisfy generic goal_action",
+        "successful prerequisite inspection activates the terminal procedure schema for exactly the next decision without a model detail turn",
+        "intermediate CDP act and transaction capabilities are setup writes and cannot force or satisfy terminal goal completion",
+        "goal declarations attached to setup-only operations cannot freeze completion onto a non-terminal capability, while one bounded-terminal operation remains host-correlated and compound goals remain reviewed",
+        "inspection projects role, editability, semantic region, viewport zone, and bounds for actionable controls",
+        "inspection independently projects a bounded editableTargets map with locator, semantic identity, owner scope, and fingerprint even when broad control enumeration reaches its limit",
+        "a search textbox outside the declared owner scope fails before text dispatch while the scope-owned composer passes regardless of viewport geometry",
+        "a stale inspected page target ID fails before any browser input dispatch",
+        "browser procedures reject editable set_value or key steps that omit their inspected target contract",
+        "exact-text lenses rank viewport matches before offscreen matches and expose a flat actionable ancestor locator",
+        "a postcondition already true before an action remains a failure even when unrelated page text changes",
+        "a newly satisfied scalar predicate or increased expected-text occurrence can prove the corresponding state transition",
+        "set_value plus Enter dispatches trusted key input and completes as one transaction",
+        "a bounded procedure returns separate action, observation, and completion_proof records and rejects dispatched input when any scoped assertion fails",
+        "scoped count, exact latest-text, composer-value, and focus assertions are evaluated before and after input by the native hot operation rather than trusted from model output",
+        "procedure assertions accept the same exact text locator vocabulary as actions, and dispatched terminal input with failed proof returns commit_unknown for read-only reconciliation instead of inviting a blind retry",
+        "a missing transaction target returns its zero-based step index, action, locator, and bounded action-ready recovery matches without another generic inspection",
+        "bounded text and CSS query lenses remain projected separately from the always-on control list",
+        "invalid empty-key actions fail before native dispatch"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "native/windows/ops/desktop/windows-cdp-control.js",
+        "native/windows/ops/desktop/windows-cdp-control.test.js",
+        "native/windows/ops/desktop/windows-cdp-inspect.manifest.json",
+        "native/windows/ops/desktop/windows-cdp-act.manifest.json",
+        "native/windows/ops/desktop/windows-cdp-procedure.manifest.json",
+        "plugins/wasm-agent/server/master_frontier/v6/v5_bridge.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/server/master_frontier/v6/windows_control_plugin.py",
+        "plugins/wasm-agent/server/master_frontier/v6/browser_procedure_plugin.py",
+        "plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_controller.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the first failed resolver, CDP input sequence, or proof invariant before changing prompts or decision ceilings.",
+        "On commit_unknown, inspect the compact action and assertion receipt, then use one read-only targeted query lens; never retry the mutation from an unproven failure."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-grounded-model-decision",
+      "owner": "plugins/wasm-agent/server/master_frontier/v6",
+      "claim": "A conceptual V6 model_decision may choose bounded semantic evidence before recommending a current-system improvement, while a declared self-contained conversation remains one-call and tool-free.",
+      "whenToUse": "After changing V6 answer-only routing, conceptual evidence projection, model_decision authority, prior terminal evidence, or current-system recommendation behavior.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py",
+        "V6OwnedControllerTests.test_self_contained_conversation_is_answer_only_in_one_provider_call",
+        "V6OwnedControllerTests.test_conceptual_model_decision_can_ground_harness_improvement_before_answering",
+        "V6OwnedControllerTests.test_conceptual_followup_receives_transcript_bound_prior_terminal_proof"
+      ],
+      "timeoutSec": 10,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "a declared self-contained conceptual conversation completes in one provider call with no provider tools",
+        "the exact observed harness-improvement prompt classified as conceptual model_decision receives the stable four-tool semantic surface plus only the three generic route-navigation capabilities repo.map, repo.read, and repo.search",
+        "the model can batch existing-capability and readiness evidence reads without a vocabulary-dependent discover turn and finish with two successful repository receipts",
+        "the grounded answer recognizes that the proof loop already exists and names the measured android_device_missing bottleneck instead of recommending duplicate proof machinery",
+        "a conceptual model_decision follow-up retains compact prior terminal proof while semantic tools remain available"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr",
+        "completed V6 run local_tools and evidence receipts"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/authority.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/server/master_frontier/v6/controller.py",
+        "plugins/wasm-agent/server/master_frontier/v6/projection.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the persisted task contract, projected tool count, semantic decisions, and receipts for the first failing turn.",
+        "Do not add prompt vocabulary or product-specific routing heuristics; repair the generic authority or projection contract."
       ]
     },
     {
@@ -283,6 +656,154 @@
       "nextSuggestedSteps": [
         "Inspect diagnostics.performance.phases and provider_calls before changing architecture.",
         "Optimize the largest measured non-provider phase and rerun one production CDP turn."
+      ]
+    },
+    {
+      "id": "master-frontier-codex-decision-thread-isolation",
+      "owner": "labs/wasm-agent",
+      "claim": "The ChatGPT-authenticated Codex decision adapter negotiates the app-server experimental protocol, disables Codex-owned environments, dynamic tools, selected capability roots, and personality context by default, preserves the host-supplied semantic decision contract, rotates decision threads after four turns while preserving the complete host projection and tool contract, and provides one explicit rollback flag for protocol compatibility.",
+      "whenToUse": "After changing the Codex subscription adapter, app-server initialization, decision-thread isolation, provider tool decisions, or unexplained provider-input overhead.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/test_codex_subscription_provider.py"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "initialize declares capabilities.experimentalApi before experimental isolation fields are used",
+        "decision threads declare empty environments, dynamic tools, and selected capability roots with personality none",
+        "MF_CODEX_DECISION_THREAD_ISOLATION=0 removes only the isolation fields as an explicit compatibility rollback",
+        "tool names and arguments remain constrained by the host-supplied output schema",
+        "a decision thread remains reusable through turn four and rotates before turn five into a fresh thread with the same model, isolation, and tool contract",
+        "provider status, exact usage, recovery, and continuation tests remain passing"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr",
+        "labs/wasm-agent/v7-procedure-kernel-plugin/live-results/windows-list-isolated-codex-thread.json",
+        "labs/wasm-agent/v7-procedure-kernel-plugin/live-results/windows-list-isolated-codex-thread-control.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/codex_subscription_provider.py",
+        "labs/wasm-agent/test_codex_subscription_provider.py",
+        "installed Codex app-server protocol version"
+      ],
+      "nextSuggestedSteps": [
+        "Run the unit promise before deploying a provider-adapter change.",
+        "Use a fresh one-call production fixture to measure token effects; do not promote one latency sample into a guarantee.",
+        "If the installed app-server rejects isolation fields, set MF_CODEX_DECISION_THREAD_ISOLATION=0 and inspect protocol negotiation before changing V6."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-cdp-lifecycle-golden",
+      "owner": "tools/context+plugins/wasm-agent",
+      "claim": "The production Avatar Chat reports the typed persistent CDP lifecycle through exactly one provider decision and one proof-owned read-only status operation, with zero completion gaps and no stall diagnostic.",
+      "whenToUse": "After changing V6 goal completion, terminal results, Windows CDP status projection, provider context, live-client control, or production deployment.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-v6-cdp-lifecycle-golden.py"
+      ],
+      "timeoutSec": 180,
+      "cost": {
+        "tokenCost": "medium",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral",
+        "production"
+      ],
+      "passRequires": [
+        "a fresh production Electron renderer accepts a clean-session command and proves its composer is empty",
+        "the unchanged read-only lifecycle objective returns closed, open_no_page, or open_page",
+        "diagnostics report exactly one provider call and zero completion gaps",
+        "the local tool ledger contains exactly one successful client.windows.browser.cdp.status operation",
+        "no stall diagnostic, navigation, open, close, or mutation operation occurs"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v6-cdp-lifecycle-golden.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/codex_subscription_provider.py",
+        "plugins/wasm-agent/server/master_frontier/v6/controller.py",
+        "plugins/wasm-agent/server/master_frontier/v6/goal_ledger.py",
+        "plugins/wasm-agent/server/master_frontier/v6/kernel.py",
+        "plugins/wasm-agent/server/master_frontier/v6/windows_control_plugin.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/public/modules/client-presence.js",
+        "tools/context/prove-master-frontier-v6-cdp-lifecycle-golden.py"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the persisted run and proof artifact when provider calls exceed one, completion gaps appear, or the typed lifecycle answer disappears.",
+        "Repair the generic proof, completion, or projection contract before changing prompts or decision ceilings."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-cdp-runtime-inspection",
+      "owner": "tools/context+native/windows/ops/desktop+plugins/wasm-agent",
+      "claim": "From a proven-empty production Electron session, Master:frontier classifies an explicitly non-mutating browser-runtime objective as runtime_inspection, executes exactly one successful getter-safe CDP runtime inspection with no browser mutation, returns a typed found/not-found answer carrying target and revision identity, and terminates with zero completion gaps in at most three provider calls.",
+      "whenToUse": "After changing client-action negation handling, V6 task classification or completion requirements, runtime-inspection capability metadata, Windows CDP runtime descriptors, hot-op publication, client receipt projection, or production deployment.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-v6-cdp-runtime-inspection.py"
+      ],
+      "timeoutSec": 240,
+      "cost": {
+        "tokenCost": "medium",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral",
+        "production"
+      ],
+      "passRequires": [
+        "a fresh production Electron renderer accepts a clean-session command and proves its composer is empty",
+        "the unchanged explicitly non-mutating objective resolves to request_class runtime_inspection",
+        "the local tool ledger contains exactly one successful client.windows.browser.cdp.runtime.inspect operation",
+        "no CDP navigation, action, transaction, procedure, click, key, typing, or other mutation operation occurs",
+        "the final answer states found or not found and includes target identity, a revision, read-only status, and zero getter invocations",
+        "diagnostics report zero completion gaps and no more than three provider calls"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v6-cdp-runtime-inspection.json"
+      ],
+      "invalidatedBy": [
+        "native/windows/ops/desktop/windows-cdp-runtime-inspect.js",
+        "native/windows/ops/desktop/windows-cdp-runtime-inspect.manifest.json",
+        "native/windows/ops/desktop/windows-cdp-control.js",
+        "plugins/wasm-agent/scripts/generate-native-release-feed.js",
+        "plugins/wasm-agent/server/master_frontier/intent.py",
+        "plugins/wasm-agent/server/master_frontier/planner.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/server/master_frontier/v6/controller.py",
+        "plugins/wasm-agent/server/master_frontier/v6/kernel.py",
+        "plugins/wasm-agent/server/master_frontier/v6/windows_control_plugin.py",
+        "plugins/wasm-agent/server/master_frontier/v6/v5_bridge.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/tests/master_frontier_intent.test.py",
+        "plugins/wasm-agent/tests/master_frontier_planner.test.py",
+        "plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_windows_control_plugin.test.py",
+        "tools/context/prove-master-frontier-v6-cdp-runtime-inspection.py",
+        "installed Windows hot-op catalog or production renderer availability"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the persisted task contract first when the request class is not runtime_inspection.",
+        "Inspect the one-shot operation transition and model_projection when target, revision, selection, or getter evidence is absent.",
+        "Repair the generic intent, evidence, or completion contract before changing prompts, product strings, selectors, or provider decision ceilings."
       ]
     },
     {
@@ -378,7 +899,7 @@
     {
       "id": "master-frontier-v6-authenticated-cloud-canary",
       "owner": "plugins/wasm-agent/server/master_frontier",
-      "claim": "An objective-bound temporary non-admin identity can run one read-only V6 source task through the authenticated production endpoint, produce exact usage and terminal integrity proof, and be revoked afterward.",
+      "claim": "An objective-bound temporary non-admin identity can run one read-only V6 source task through the authenticated production endpoint, produce exact usage, a reconstructable verified trajectory, and terminal integrity proof, and be revoked afterward.",
       "whenToUse": "After changing V6 production routing, direct-envelope authorization, source capability selection, completion requirements, usage accounting, event anchoring, or synthetic-canary cleanup.",
       "command": [
         "python3",
@@ -402,6 +923,7 @@
         "the temporary identity authenticates with role user and an exact objective-bound grant",
         "the production endpoint returns protocol v6 with one successful repository read",
         "exact provider usage is measured and all declared completion capabilities are satisfied",
+        "the persisted hash-linked trajectory verifies, matches the final diagnostic head, reconstructs every provider context, and replays the terminal result",
         "the canary changes no files and closes a verified terminal anchor chain",
         "the grant and temporary user are revoked even when the provider run fails"
       ],
@@ -421,131 +943,16 @@
       ]
     },
     {
-      "id": "master-frontier-v6-production-client-ui",
-      "owner": "plugins/wasm-agent/server/master_frontier",
-      "claim": "Authenticated production V6 can select the one live Electron renderer that truthfully advertises Browser-widget control, open that widget, and finish only after the installed client acknowledges the exact command.",
-      "whenToUse": "After changing V6 client capability discovery, live-client normalization, renderer presence, route-scoped UI authority, command acknowledgement, completion gates, or production deployment.",
-      "command": [
-        "python3",
-        "tools/context/prove-master-frontier-v6-client-ui.py"
-      ],
-      "timeoutSec": 300,
-      "cost": {
-        "tokenCost": "small",
-        "runtimeCost": "medium",
-        "rebuildCost": "none",
-        "confidence": "high"
-      },
-      "evidenceClasses": [
-        "production",
-        "runtime",
-        "behavioral"
-      ],
-      "passRequires": [
-        "an existing admin session is proven without exposing credentials or changing accounts",
-        "one live production Electron renderer declares control.widget.open and receives open_widget for widget id browser",
-        "the V6 semantic receipt is acknowledged and the native-control command artifact finishes with result ok true",
-        "the production run ledger contains at least one nonempty model-authored public V6 commentary update",
-        "exact provider usage is measured, the client.widget.open completion requirement is clear, and no files change",
-        "the run closes a verified terminal external anchor chain"
-      ],
-      "outputArtifacts": [
-        "reports/context/latest/master-frontier-v6-client-ui.json"
-      ],
-      "invalidatedBy": [
-        "plugins/wasm-agent/server/live_clients.py",
-        "plugins/wasm-agent/server/master_frontier/**",
-        "plugins/wasm-agent/server/agent_route_contracts.json",
-        "plugins/wasm-agent/public/modules/master-frontier/useful-fallback.js",
-        "plugins/wasm-agent/public/modules/client-presence.js",
-        "plugins/wasm-agent/server/static_server.py",
-        "tools/context/prove-master-frontier-v6-client-ui.py",
-        "production deployment or installed Electron runtime change"
-      ],
-      "nextSuggestedSteps": [
-        "Inspect upstreamError, the selected client manifest, and the exact command artifact before changing prompts or retrying.",
-        "Treat a blank or missing client capability list as no authority; never restore runtime-type defaults or union sibling-client capabilities."
-      ]
-    },
-    {
-      "id": "windows-native-browser-input-receipt-source",
-      "owner": "native/windows",
-      "claim": "The disabled-by-default Electron Browser Agent can explicitly enable one fresh redacted native primary-gesture receipt, optionally exercise it through one bounded synthetic dispatch, and inspect only truthful pre-dispatch evidence on demand.",
-      "whenToUse": "After changing native web-surface input enablement, pre-dispatch capture, timer expiry, bounds validation, receipt redaction, Browser Agent control, observability projection, preload wiring, or the Browser widget native contract.",
-      "command": [
-        "bash",
-        "-lc",
-        "npm --prefix native/windows/src run test:web-surfaces && node --input-type=module --check < plugins/wasm-agent/public/modules/browser/browser.entry.js && node --experimental-vm-modules plugins/wasm-agent/public/modules/client-observability.test.mjs && node --experimental-vm-modules plugins/wasm-agent/public/modules/client-presence.test.mjs && node plugins/wasm-agent/tests/browser_widget_native_contract.test.mjs && python3 plugins/wasm-agent/tests/live_clients.test.py && python3 plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_contracts.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_controller.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py && python3 plugins/wasm-agent/tests/master_frontier_route_contracts.test.py && python3 plugins/wasm-agent/tests/client_first_cloud.test.py"
-      ],
-      "timeoutSec": 30,
-      "cost": {
-        "tokenCost": "tiny",
-        "runtimeCost": "low",
-        "rebuildCost": "none",
-        "confidence": "high"
-      },
-      "evidenceClasses": [
-        "static",
-        "behavioral"
-      ],
-      "passRequires": [
-        "input receipt capture is disabled by default and only native input-receipt with an explicit enabled boolean changes that state; disabling clears pending input, the receipt, and its expiry timer",
-        "the renderer advertises receipt enablement and pointer dispatch only after one native capability probe confirms each installed-shell primitive, and remote open_widget is idempotent for an already-open Browser",
-        "surface status and pointer admission derive readiness from the same current loading, error, and URL state, while superseded avatar-overlay snapshot work schedules a latest geometry reconciliation instead of leaving stale suppression state",
-        "while enabled, Electron before-mouse-event creates a receipt only after matching left mouseDown and mouseUp on the same current main document and rejects right, middle, incomplete, blurred, navigated, or out-of-bounds input",
-        "the manifest limits each surface to one in-memory receipt and every accepted gesture replaces it with a real overwrite-safe inputReceiptTtlMs 120000 timer so an older timer cannot clear a newer receipt",
-        "normal status omits receipt state while status with includeInputReceipt true returns inputReceiptEnabled plus inputReceipt as null or one hermes.wasm_agent.native_web_surface_input_receipt.v1 object",
-        "the receipt action is pointer.primary_gesture and outcome is observed_pre_dispatch, proving only native pre-dispatch observation and never a click, DOM dispatch, target activation, or page success",
-        "pointer dispatch accepts one in-bounds integer coordinate pair only while the surface is visible, ready, and receipt-enabled; dispatch acceptance remains separate from independently observed receipt evidence",
-        "synthetic command-correlated receipts are labeled electron_synthetic while all other accepted native gestures are labeled unattributed_native_input; neither source is described as proof of a physical user click",
-        "the receipt is redacted and bounded to identity, time, action, outcome, left button, current-document state, age, and validated coordinates and viewport without a selector, DOM target, page content, form value, or raw Electron event",
-        "capture and disclosure add no page JavaScript, polling loop, renderer push, or persistence",
-        "the Browser Agent button invokes native input-receipt with explicit enabled state and the on-demand observability projection accepts only a valid enabled fresh receipt without placing it in always-on model context or the persisted interaction trail",
-        "the Browser wiring still packages and exposes the native web-surface manager contract"
-      ],
-      "outputArtifacts": [
-        "command stdout/stderr"
-      ],
-      "invalidatedBy": [
-        "native/windows/src/main/web-surfaces/capability-manifest.json",
-        "native/windows/src/main/web-surfaces/manager.js",
-        "native/windows/src/main/web-surfaces/manager.test.js",
-        "native/windows/src/preload.js",
-        "plugins/wasm-agent/public/modules/client-observability.js",
-        "plugins/wasm-agent/public/modules/client-observability.test.mjs",
-        "plugins/wasm-agent/public/modules/browser/browser.entry.js",
-        "plugins/wasm-agent/public/modules/browser/module.js",
-        "plugins/wasm-agent/public/modules/app-registry.js",
-        "plugins/wasm-agent/public/app.js",
-        "plugins/wasm-agent/public/modules/client-presence.js",
-        "plugins/wasm-agent/public/modules/client-presence.test.mjs",
-        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
-        "plugins/wasm-agent/server/master_frontier/v6/adapters.py",
-        "plugins/wasm-agent/server/master_frontier/v6/v5_bridge.py",
-        "plugins/wasm-agent/server/live_clients.py",
-        "plugins/wasm-agent/server/static_server.py",
-        "plugins/wasm-agent/server/agent_route_contracts.json",
-        "plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py",
-        "plugins/wasm-agent/tests/master_frontier_v6_controller.test.py",
-        "plugins/wasm-agent/tests/browser_widget_native_contract.test.mjs"
-      ],
-      "nextSuggestedSteps": [
-        "Fix the first enablement, pre-dispatch, bounds, timer, redaction, projection, or wiring assertion before changing the receipt schema or TTL.",
-        "Treat a source pass as source evidence only; prove dispatch acceptance and an independently observed synthetic receipt in the final NSIS-installed Electron app before making a synthetic runtime claim.",
-        "A physical-user-click claim still requires one fresh human gesture after receipt mode is enabled; never promote a synthetic or unattributed receipt into physical proof."
-      ]
-    },
-    {
-      "id": "master-frontier-full-power-client-source",
+      "id": "windows-companion-desktop-source",
       "owner": "plugins/wasm-agent+native/windows",
-      "claim": "An authenticated Master:frontier run can inspect or mutate an installed Electron Browser surface with separate proof-bound semantic capabilities over arbitrary JavaScript, and execute arbitrary PowerShell or CMD under the installed Windows app user token through explicit capability-selected, audited client commands.",
-      "whenToUse": "After changing unrestricted Browser JavaScript, Windows-user shell execution, renderer command polling, live-client registries, Master:frontier client actions, capability selection, packaging, or installer verification.",
+      "claim": "The Windows companion renders the exact cloud-PWA avatar/chat token in compact and expanded transparent native bounds, applies cloud-configured non-focusing topmost enforcement, and lets authenticated Master:frontier control the current-user Windows desktop through bounded describe, inspect, act, and prove UI Automation contracts.",
+      "whenToUse": "After changing companion visuals or bounds, avatar/panel dragging, auth-only startup, companion preload IPC, Windows UI Automation, desktop capability routing, source packaging, or final-installer parity assertions.",
       "command": [
         "bash",
         "-lc",
-        "npm --prefix native/windows/src run test:web-surfaces && npm --prefix native/windows/src run test:installed-proof && node --experimental-vm-modules plugins/wasm-agent/public/modules/client-presence.test.mjs && node plugins/wasm-agent/tests/browser_widget_native_contract.test.mjs && python3 plugins/wasm-agent/tests/live_clients.test.py && python3 plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_contracts.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_controller.test.py && python3 plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py && python3 plugins/wasm-agent/tests/master_frontier_route_contracts.test.py && node --check native/windows/src/main.js && node --check native/windows/scripts/verify-windows-installer.js"
+        "HORC_WIN_FAST_PACK=0 HORC_WIN_FAST_TASKS=test:companion-desktop-source ./scripts/public/clone/horc.sh build win-fast"
       ],
-      "timeoutSec": 30,
+      "timeoutSec": 20,
       "cost": {
         "tokenCost": "tiny",
         "runtimeCost": "low",
@@ -557,41 +964,47 @@
         "behavioral"
       ],
       "passRequires": [
-        "Browser JavaScript accepts arbitrary source without semantic allowlisting and evaluates it in the selected native page main world through one existing web-surface invoke",
-        "read-only Browser JavaScript requires a typed bounded scalar observation and cannot satisfy the separate mutation capability's changed-postcondition proof",
-        "Windows execution accepts arbitrary PowerShell or CMD without a command allowlist and runs with the installed app process token rather than claiming elevation",
-        "payload, output, environment-count, and timeout limits bound transport and observability costs without restricting command semantics",
-        "the renderer advertises each authority only after the installed native manifest or bridge reports the exact capability",
-        "Master:frontier selects a client with the exact required capability, validates the transport envelope, queues one command, and returns command-correlated proof",
-        "the final-installer verifier requires exact extracted/source full-power module parity plus the Browser JavaScript and Windows shell capability symbols"
+        "the companion URL uses the production cloud PWA and the shared agent-avatar token remains the visual owner without a native or companion-CSS redraw",
+        "compact native bounds contain the existing 58px token and inset while expanded bounds anchor the same PWA chat panel without mobile fullscreen substitution",
+        "the native shell exposes a bounded non-focusing topmost enforcement primitive, the cloud companion module configures its cadence, status reports active policy and enforcement counters, and disposal clears the watchdog",
+        "native drag movement is animation-frame coalesced, samples the absolute OS cursor, preserves window width and height, excludes interactive chat-header controls, and terminates on release or capture loss; one moved drag-end operation persists and emits proof",
+        "authenticated startup shows only the companion renderer while unauthenticated startup exposes the normal setup/login window",
+        "desktop describe reports current_user_token authority, no silent elevation or secure-desktop support, and a separate signed-broker boundary for any future elevation",
+        "desktop inspect resolves explicit HWND, process, and title targets fail-closed without falling back to the foreground window, returns a flat bounded tree that includes the resolved window root, reports element and conversion-error counts, rejects an empty enumeration, and provides short-lived snapshot refs; act accepts only declared UIA patterns; act/prove completion requires an independently reacquired scalar postcondition",
+        "Master:frontier selects the exact desktop capability, validates bounded payloads, queues one correlated client command, and refuses unverified declared postconditions",
+        "the final-installer verifier requires source-matched preload, companion overlay/startup, desktop facade/UIA module, capability manifest, and operation symbols",
+        "the source lane appends one Windows build benchmark and creates no installer, feed publication, or installed-runtime claim"
       ],
       "outputArtifacts": [
+        "reports/build/windows/build-benchmarks.jsonl",
         "command stdout/stderr"
       ],
       "invalidatedBy": [
-        "native/windows/src/main/full-power-executor.js",
-        "native/windows/src/main/full-power-executor.test.js",
-        "native/windows/src/main/web-surfaces/capability-manifest.json",
-        "native/windows/src/main/web-surfaces/manager.js",
-        "native/windows/src/main/web-surfaces/manager.test.js",
-        "native/windows/src/main.js",
-        "native/windows/src/electron-builder.json",
-        "native/windows/scripts/verify-windows-installer.js",
-        "plugins/wasm-agent/public/modules/client-presence.js",
-        "plugins/wasm-agent/public/modules/client-presence.test.mjs",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/index.html",
+        "plugins/wasm-agent/public/styles.css",
+        "plugins/wasm-agent/public/modules/assistant/companion-window.js",
+        "plugins/wasm-agent/public/modules/assistant/companion-window.css",
         "plugins/wasm-agent/server/live_clients.py",
         "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
         "plugins/wasm-agent/server/master_frontier/v5/policy.py",
         "plugins/wasm-agent/server/master_frontier/v6/adapters.py",
         "plugins/wasm-agent/server/master_frontier/v6/v5_bridge.py",
         "plugins/wasm-agent/server/agent_route_contracts.json",
-        "plugins/wasm-agent/tests/live_clients.test.py",
-        "plugins/wasm-agent/tests/master_frontier_client_ui_actions.test.py",
-        "plugins/wasm-agent/tests/browser_widget_native_contract.test.mjs"
+        "native/windows/src/main.js",
+        "native/windows/src/preload.js",
+        "native/windows/src/main/companion-overlay.js",
+        "native/windows/src/main/companion-startup.js",
+        "native/windows/src/main/windows-desktop-control.js",
+        "native/windows/src/main/windows-desktop/uia-control.js",
+        "native/windows/src/main/native-capabilities.js",
+        "native/windows/src/electron-builder.json",
+        "native/windows/scripts/verify-windows-installer.js"
       ],
       "nextSuggestedSteps": [
-        "Fix the first execution, capability-selection, command-correlation, packaging, or extracted-source parity assertion before rebuilding.",
-        "Treat a source pass as source evidence only; require final extracted NSIS verification and harmless command receipts from the installed Electron Browser and Windows bridge before claiming runtime authority."
+        "Keep later avatar/chat visual changes in the cloud-PWA lane; do not rebuild Windows unless a native bounds, IPC, permission, or OS primitive changed.",
+        "Treat the focused pass as source evidence only; build and extract the final NSIS once, then require installed token, drag, chat, UIA canary, generic inspect-act-prove, reconnect, and auth persistence proof.",
+        "If elevation becomes necessary, record the exact blocked application/integrity wall before designing the separate signed broker."
       ]
     },
     {
@@ -1678,16 +2091,31 @@
       "owner": "native/windows",
       "claim": "Synthesized speech produces measurable samples on the default Windows capture endpoint.",
       "whenToUse": "After the loopback route promise passes but browser speech still reports no-speech.",
-      "command": ["python3", "tools/windows/prove-audio-signal.py", "--origin", "https://wa.colmeio.com"],
+      "command": [
+        "python3",
+        "tools/windows/prove-audio-signal.py",
+        "--origin",
+        "https://wa.colmeio.com"
+      ],
       "timeoutSec": 60,
-      "cost": {"tokenCost":"tiny","runtimeCost":"medium","rebuildCost":"none","confidence":"high"},
-      "evidenceClasses": ["runtime", "behavioral"],
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
       "passRequires": [
         "the installed Windows bridge is reachable through the production origin",
         "the SHA-verified probe_windows_audio_signal hot operation runs",
         "peak is at least 0.01 and RMS is at least 0.001 during the bounded synthesized phrase"
       ],
-      "outputArtifacts": ["reports/windows/latest/audio-signal-proof.json"],
+      "outputArtifacts": [
+        "reports/windows/latest/audio-signal-proof.json"
+      ],
       "invalidatedBy": [
         "native/windows/ops/audio/**",
         "tools/windows/prove-audio-signal.py",
@@ -1904,6 +2332,38 @@
         "Use --reuse-install-report only when the named report proves the same promoted build id and APK SHA in Android diagnostics.",
         "If this aggregate loop lacks a needed knob, add the knob to the script instead of hand-running the same sequence again.",
         "If input budget fails after install, inspect the aggregate report metrics before rebuilding again."
+      ]
+    },
+    {
+      "id": "windows-dispatcher-supervisor-recovery",
+      "owner": "native/windows/launcher",
+      "claim": "The out-of-process Windows supervisor detects an overdue Electron native-command lease, restarts only the Electron child, preserves user/CDP state, exposes bounded recovery evidence, and suppresses restart loops.",
+      "whenToUse": "After changing native-control handler timeouts, result upload, dispatcher progress, the Windows supervisor, installer launcher resources, or recovery diagnostics.",
+      "command": ["npm", "--prefix", "native/windows/src", "run", "test:windows-supervisor"],
+      "timeoutSec": 45,
+      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
+      "evidenceClasses": ["static", "behavioral", "package"],
+      "passRequires": [
+        "Electron persists compact handling, handler-finished, uploading, and finished leases with command-specific deadlines",
+        "the supervisor recognizes an active lease only after its deadline plus grace",
+        "finished leases never trigger recovery",
+        "the supervisor restart budget permits at most two restarts per ten minutes with a thirty-second cooldown",
+        "dispatcher state and last recovery evidence remain available outside Electron",
+        "the Windows x64 supervisor cross-build succeeds",
+        "the final extracted installer contains the dispatcher lease module and dispatcher.recover supervisor capability"
+      ],
+      "outputArtifacts": ["command stdout/stderr", "native/windows/src/build/wasm-agent-launcher.exe", "native/windows/release/VERIFY.json"],
+      "invalidatedBy": [
+        "native/windows/launcher/**",
+        "native/windows/src/main/dispatcher-health.js",
+        "native/windows/src/main.js",
+        "native/windows/src/main/supervisor-client.js",
+        "native/windows/src/electron-builder.json",
+        "native/windows/scripts/verify-windows-installer.js"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first lease, budget, cross-build, or extracted-package invariant before installing.",
+        "After installation, inject a deliberately overdue harmless lease and prove one child PID transition plus successful subsequent get_bridge_status."
       ]
     },
     {
@@ -2429,10 +2889,22 @@
       "owner": "plugins/wasm-agent",
       "claim": "A temporary non-admin identity can run one exact-objective MF5 production task and is revoked afterward.",
       "whenToUse": "After production auth, direct-head authorization, MF5 routing, provider transport, or cloud state changes.",
-      "command": ["python3", "tools/context/prove-master-frontier-authenticated-canary.py"],
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-authenticated-canary.py"
+      ],
       "timeoutSec": 300,
-      "cost": {"tokenCost": "small", "runtimeCost": "medium", "rebuildCost": "none", "confidence": "high"},
-      "evidenceClasses": ["production", "runtime", "behavioral"],
+      "cost": {
+        "tokenCost": "small",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "production",
+        "runtime",
+        "behavioral"
+      ],
       "passRequires": [
         "the temporary identity authenticates with role user, never admin",
         "the grant matches one exact objective digest, session id, and expiry",
@@ -2441,7 +2913,9 @@
         "the grant and user are deleted in finally and the same cookie becomes unauthenticated",
         "the report stores no cookie, signing secret, email, or response body"
       ],
-      "outputArtifacts": ["reports/context/latest/master-frontier-authenticated-canary.json"],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-authenticated-canary.json"
+      ],
       "invalidatedBy": [
         "plugins/wasm-agent/server/synthetic_canary.py",
         "plugins/wasm-agent/server/static_server.py",
@@ -3062,10 +3536,22 @@
       "owner": "labs/wasm-agent",
       "claim": "Goose 1.41.0 runs the canonical fixture through the private exact-model broker from an immutable credential-free adapter volume and is rankable only after private semantic proof.",
       "whenToUse": "After changing Goose packaging, invocation, broker routing, answer shaping, or benchmark readiness.",
-      "command": ["python3", "labs/wasm-agent/check-goose-adapter.py"],
+      "command": [
+        "python3",
+        "labs/wasm-agent/check-goose-adapter.py"
+      ],
       "timeoutSec": 30,
-      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "medium"},
-      "evidenceClasses": ["static", "runtime", "behavioral"],
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "medium"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral"
+      ],
       "passRequires": [
         "the adapter uses the integrity-pinned official ARM64 GNU Goose 1.41.0 release",
         "all runtime state is ephemeral and no host config, sessions, secrets, or keyring are packaged",
@@ -3096,10 +3582,22 @@
       "owner": "labs/wasm-agent",
       "claim": "OpenHands 1.16.0 runs headlessly inside the isolated lane with no Docker or host authority and becomes rankable only after exact-model and private semantic proof.",
       "whenToUse": "After changing OpenHands packaging, process runtime, event shaping, broker configuration, or benchmark readiness.",
-      "command": ["python3", "labs/wasm-agent/check-openhands-adapter.py"],
+      "command": [
+        "python3",
+        "labs/wasm-agent/check-openhands-adapter.py"
+      ],
       "timeoutSec": 30,
-      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "medium"},
-      "evidenceClasses": ["static", "runtime", "behavioral"],
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "medium"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral"
+      ],
       "passRequires": [
         "the immutable package contains official openhands 1.16.0 with a dependency-freeze receipt",
         "the process runtime operates only inside the private lane workspace without Docker socket or host state",
@@ -3107,8 +3605,19 @@
         "native JSONL agent messages provide bounded answer evidence",
         "the private semantic fixture passes before benchmark promotion"
       ],
-      "outputArtifacts": ["reports/context/latest/openhands-adapter-package-result.json", "reports/context/latest/live-fixture-openhands-semantic-result.json", "reports/context/latest/openhands-benchmark-readiness-proof.json"],
-      "invalidatedBy": ["labs/wasm-agent/openhands-live-runner.py", "labs/wasm-agent/package-openhands-adapter.py", "labs/wasm-agent/check-openhands-adapter.py", "labs/wasm-agent/fixtures/openhands-process-runtime-broker-contract.json", "labs/wasm-agent/fixtures/openhands-pip-resolver-contract.json", "labs/wasm-agent/harness-adapters.json"],
+      "outputArtifacts": [
+        "reports/context/latest/openhands-adapter-package-result.json",
+        "reports/context/latest/live-fixture-openhands-semantic-result.json",
+        "reports/context/latest/openhands-benchmark-readiness-proof.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/openhands-live-runner.py",
+        "labs/wasm-agent/package-openhands-adapter.py",
+        "labs/wasm-agent/check-openhands-adapter.py",
+        "labs/wasm-agent/fixtures/openhands-process-runtime-broker-contract.json",
+        "labs/wasm-agent/fixtures/openhands-pip-resolver-contract.json",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
       "nextSuggestedSteps": [
         "If dependency resolution fails, preserve official constraints and use the documented uv path rather than manual overrides.",
         "If an unexpected action appears, harvest its generic authority or runtime contract before changing prompts.",
@@ -3120,10 +3629,23 @@
       "owner": "labs/wasm-agent",
       "claim": "A proven nine-lane benchmark is ranked only after every exact-model gateway receipt is broker-attributed to a registered lane and every lane passes private semantic scoring.",
       "whenToUse": "After changing lane credentials, gateway receipts, efficiency policy, ranking weights, golden-pattern extraction, or Loop 3 benchmark output.",
-      "command": ["python3", "labs/wasm-agent/rank-nine-lane-benchmark.py", "labs/wasm-agent/staging/loop3-ranked-nine-20260712-benchmark-nine-lane.json"],
+      "command": [
+        "python3",
+        "labs/wasm-agent/rank-nine-lane-benchmark.py",
+        "labs/wasm-agent/staging/loop3-ranked-nine-20260712-benchmark-nine-lane.json"
+      ],
       "timeoutSec": 30,
-      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
-      "evidenceClasses": ["static", "runtime", "behavioral"],
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral"
+      ],
       "passRequires": [
         "all nine lanes completed the identical digest-bound task and passed the private semantic contract",
         "every successful receipt has one validated registered laneId and every lane has attributed receipts",
@@ -3131,8 +3653,21 @@
         "latency, prompt tokens, provider calls, tool calls, and warning penalties are explicit and reproducible",
         "golden-pattern candidates stay empty unless the report and every lane expose admissible normalized strategy evidence with observable tool-call counts; admitted patterns remain candidates until Loop 4 regression authorizes promotion"
       ],
-      "outputArtifacts": ["reports/context/latest/nine-lane-ranking-result.json", "labs/wasm-agent/staging/loop3-ranked-nine-20260712-benchmark-nine-lane.json"],
-      "invalidatedBy": ["labs/wasm-agent/model-gateway.py", "labs/wasm-agent/safe_lab_host.py", "labs/wasm-agent/lane-runner.py", "labs/wasm-agent/agent_trajectory.py", "labs/wasm-agent/nine-lane-orchestrator.py", "labs/wasm-agent/rank-nine-lane-benchmark.py", "labs/wasm-agent/test_strategy_ranking.py", "labs/wasm-agent/efficiency_policy.py", "labs/wasm-agent/fixtures/nine-lane-receipt-attribution-contract.json"],
+      "outputArtifacts": [
+        "reports/context/latest/nine-lane-ranking-result.json",
+        "labs/wasm-agent/staging/loop3-ranked-nine-20260712-benchmark-nine-lane.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/model-gateway.py",
+        "labs/wasm-agent/safe_lab_host.py",
+        "labs/wasm-agent/lane-runner.py",
+        "labs/wasm-agent/agent_trajectory.py",
+        "labs/wasm-agent/nine-lane-orchestrator.py",
+        "labs/wasm-agent/rank-nine-lane-benchmark.py",
+        "labs/wasm-agent/test_strategy_ranking.py",
+        "labs/wasm-agent/efficiency_policy.py",
+        "labs/wasm-agent/fixtures/nine-lane-receipt-attribution-contract.json"
+      ],
       "nextSuggestedSteps": [
         "Wire and prove one real adapter's normalized strategy trajectory before converting any pattern into a V5 candidate.",
         "Run Loop 4 against the exact candidate digest before any promotion.",
@@ -3144,10 +3679,22 @@
       "owner": "plugins/wasm-agent/server/master_frontier/v5",
       "claim": "A V5 candidate uses direct completion only for explicitly declared self-contained conversation classes and cannot enter promotion review without an exact-digest Loop 4 regression pass.",
       "whenToUse": "After changing V5 task policy, direct completion context, controller metadata projection, candidate packaging, or Loop 4 proof rules.",
-      "command": ["python3", "labs/wasm-agent/prove-loop4-v5-direct-candidate.py"],
+      "command": [
+        "python3",
+        "labs/wasm-agent/prove-loop4-v5-direct-candidate.py"
+      ],
       "timeoutSec": 30,
-      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
-      "evidenceClasses": ["static", "runtime", "behavioral"],
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral"
+      ],
       "passRequires": [
         "direct completion is selected from declared conversation metadata without lexical prompt heuristics",
         "source and runtime task classes retain the natural tool loop",
@@ -3155,8 +3702,20 @@
         "all focused V5 regressions pass with zero safety regressions",
         "live private semantic scoring passes with one provider call, zero tools, zero warnings, exact model, and complete cleanup"
       ],
-      "outputArtifacts": ["reports/context/latest/loop4-v5-direct-candidate-regression-proof.json", "reports/context/latest/loop4-v5-direct-candidate-live-result.json", "reports/context/latest/master-frontier-v5-adapter-package-result.json"],
-      "invalidatedBy": ["plugins/wasm-agent/server/master_frontier/v5/task_policy.py", "plugins/wasm-agent/server/master_frontier/v5/context.py", "plugins/wasm-agent/server/master_frontier/controller_v5.py", "labs/wasm-agent/master-frontier-v5-live-runner.py", "labs/wasm-agent/live-fixture-orchestrator.py", "labs/wasm-agent/package-master-frontier-v5-adapter.py", "labs/wasm-agent/prove-loop4-v5-direct-candidate.py"],
+      "outputArtifacts": [
+        "reports/context/latest/loop4-v5-direct-candidate-regression-proof.json",
+        "reports/context/latest/loop4-v5-direct-candidate-live-result.json",
+        "reports/context/latest/master-frontier-v5-adapter-package-result.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/v5/task_policy.py",
+        "plugins/wasm-agent/server/master_frontier/v5/context.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v5.py",
+        "labs/wasm-agent/master-frontier-v5-live-runner.py",
+        "labs/wasm-agent/live-fixture-orchestrator.py",
+        "labs/wasm-agent/package-master-frontier-v5-adapter.py",
+        "labs/wasm-agent/prove-loop4-v5-direct-candidate.py"
+      ],
       "nextSuggestedSteps": [
         "Generate the remaining Loop 5 strategy variants as independent candidate digests.",
         "Attach a separate Loop 4 proof to every candidate before cross-candidate ranking.",
@@ -3168,10 +3727,22 @@
       "owner": "labs/wasm-agent",
       "claim": "Loop 5 packages nine unique V5 strategy artifacts, runs them concurrently under identical authority, attaches an exact-digest Loop 4 pass to each, and promotes only the smallest non-regressing generic candidate.",
       "whenToUse": "After changing V5 variant strategies, candidate packaging, improvement orchestration, duplicate budgets, Loop 4 matrix proof, ranking, or promoted harness slot 1.",
-      "command": ["python3", "labs/wasm-agent/prove-loop4-loop5-v5-matrix.py"],
+      "command": [
+        "python3",
+        "labs/wasm-agent/prove-loop4-loop5-v5-matrix.py"
+      ],
       "timeoutSec": 30,
-      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
-      "evidenceClasses": ["static", "runtime", "behavioral"],
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "runtime",
+        "behavioral"
+      ],
       "passRequires": [
         "nine strategies, artifact digests, and immutable volumes are unique",
         "all candidates use the identical fixture, model, tool authority, and budgets with nine-way overlap",
@@ -3180,8 +3751,23 @@
         "every promoted candidate has its own exact-digest Loop 4 proof with zero safety regressions",
         "promotion selects the smallest generic passing policy and updates only the winning registry slot"
       ],
-      "outputArtifacts": ["labs/wasm-agent/loop5-v5-candidates.json", "labs/wasm-agent/staging/loop5-v5-nine-20260712b-improve-nine-lane.json", "reports/context/latest/loop4-loop5-v5-matrix-proof.json", "reports/context/latest/loop5-v5-promotion-decision.json"],
-      "invalidatedBy": ["plugins/wasm-agent/server/master_frontier/v5/task_policy.py", "labs/wasm-agent/loop5-v5-strategies.json", "labs/wasm-agent/package-master-frontier-v5-adapter.py", "labs/wasm-agent/package-loop5-v5-candidates.py", "labs/wasm-agent/nine-lane-orchestrator.py", "labs/wasm-agent/model-gateway.py", "labs/wasm-agent/prove-loop4-loop5-v5-matrix.py", "labs/wasm-agent/rank-loop5-v5-candidates.py", "labs/wasm-agent/harness-adapters.json"],
+      "outputArtifacts": [
+        "labs/wasm-agent/loop5-v5-candidates.json",
+        "labs/wasm-agent/staging/loop5-v5-nine-20260712b-improve-nine-lane.json",
+        "reports/context/latest/loop4-loop5-v5-matrix-proof.json",
+        "reports/context/latest/loop5-v5-promotion-decision.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/v5/task_policy.py",
+        "labs/wasm-agent/loop5-v5-strategies.json",
+        "labs/wasm-agent/package-master-frontier-v5-adapter.py",
+        "labs/wasm-agent/package-loop5-v5-candidates.py",
+        "labs/wasm-agent/nine-lane-orchestrator.py",
+        "labs/wasm-agent/model-gateway.py",
+        "labs/wasm-agent/prove-loop4-loop5-v5-matrix.py",
+        "labs/wasm-agent/rank-loop5-v5-candidates.py",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
       "nextSuggestedSteps": [
         "Run the promoted slot through the next multi-fixture Loop 3 benchmark before generalizing beyond conversation fixtures.",
         "Keep the eight non-winning volumes only as reproducible evidence until retention policy harvests them.",
@@ -3193,10 +3779,21 @@
       "owner": "plugins/wasm-agent/server/master_frontier",
       "claim": "The runtime snapshot boundary, scoped run-store collector, and opaque proof resolver expose only compact redacted historical evidence under exact user, route, entity, freshness, and digest scope without granting model-visible database, host, or control authority.",
       "whenToUse": "After changing the runtime snapshot schema, normalization, freshness trust, compact projection, run-store scoping, proof resolution, redaction limits, or before connecting either surface to kernel.inspect.",
-      "command": ["python3", "tools/context/prove-runtime-snapshot-contract.py"],
+      "command": [
+        "python3",
+        "tools/context/prove-runtime-snapshot-contract.py"
+      ],
       "timeoutSec": 30,
-      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
-      "evidenceClasses": ["static", "behavioral"],
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
       "passRequires": [
         "the contract grants read-only snapshot authority and explicitly forbids control actions, secrets, raw logs, binary, base64, and host paths",
         "freshness is trusted only when the collector marks it fresh and its age is within the declared maximum",
@@ -3246,10 +3843,23 @@
       "owner": "plugins/wasm-agent/server/master_frontier/v5",
       "claim": "The promoted V5 minimal declared-class policy exposes compact broker-verified runtime identity, preserves one durable transient retry across resume, and passes every frozen golden and holdout semantic fixture without weakening grounded tool loops.",
       "whenToUse": "After changing V5 runtime identity context, task policy, provider reliability, promoted artifact, fixture-suite runner, or golden/holdout overlay.",
-      "command": ["python3", "labs/wasm-agent/prove-promoted-v5-fixture-suite.py", "--candidate-adapter", "labs/wasm-agent/fixtures/master-frontier-v5-runtime-actions-candidate.json"],
+      "command": [
+        "python3",
+        "labs/wasm-agent/prove-promoted-v5-fixture-suite.py",
+        "--candidate-adapter",
+        "labs/wasm-agent/fixtures/master-frontier-v5-runtime-actions-candidate.json"
+      ],
       "timeoutSec": 360,
-      "cost": {"tokenCost": "medium", "runtimeCost": "medium", "rebuildCost": "none", "confidence": "high"},
-      "evidenceClasses": ["runtime", "behavioral"],
+      "cost": {
+        "tokenCost": "medium",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral"
+      ],
       "passRequires": [
         "all seven golden and both holdout fixtures bind to the exact promoted artifact digest",
         "private semantic pass rate is 100 percent",
@@ -3258,8 +3868,23 @@
         "conversation fixtures remain direct while grounded capability questions retain their evidence tool loop",
         "every fixture proves exact model, private network isolation, bounded output, and complete cleanup"
       ],
-      "outputArtifacts": ["reports/context/latest/promoted-v5-fixture-suite-proof.json", "reports/context/latest/v5-runtime-actions-model-contract-v2-package.json"],
-      "invalidatedBy": ["plugins/wasm-agent/server/master_frontier/v5/context.py", "plugins/wasm-agent/server/master_frontier/v5/task_policy.py", "plugins/wasm-agent/server/master_frontier/v5/policy.py", "plugins/wasm-agent/server/master_frontier/v5/reliability.py", "plugins/wasm-agent/server/master_frontier/v5/trajectory.py", "plugins/wasm-agent/server/master_frontier/v5/tools.py", "plugins/wasm-agent/server/master_frontier/v5/loop.py", "labs/wasm-agent/master-frontier-v5-live-runner.py", "labs/wasm-agent/prove-promoted-v5-fixture-suite.py", "labs/wasm-agent/fixtures/v5-runtime-identity-capability-contract.json", "labs/wasm-agent/harness-adapters.json"],
+      "outputArtifacts": [
+        "reports/context/latest/promoted-v5-fixture-suite-proof.json",
+        "reports/context/latest/v5-runtime-actions-model-contract-v2-package.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/v5/context.py",
+        "plugins/wasm-agent/server/master_frontier/v5/task_policy.py",
+        "plugins/wasm-agent/server/master_frontier/v5/policy.py",
+        "plugins/wasm-agent/server/master_frontier/v5/reliability.py",
+        "plugins/wasm-agent/server/master_frontier/v5/trajectory.py",
+        "plugins/wasm-agent/server/master_frontier/v5/tools.py",
+        "plugins/wasm-agent/server/master_frontier/v5/loop.py",
+        "labs/wasm-agent/master-frontier-v5-live-runner.py",
+        "labs/wasm-agent/prove-promoted-v5-fixture-suite.py",
+        "labs/wasm-agent/fixtures/v5-runtime-identity-capability-contract.json",
+        "labs/wasm-agent/harness-adapters.json"
+      ],
       "nextSuggestedSteps": [
         "Add a second runtime fixture with available live evidence before generalizing beyond the current nine-fixture suite.",
         "If model identity changes, refresh the broker contract and rerun the suite instead of hardcoding a model name in prompts.",
@@ -3271,10 +3896,20 @@
       "owner": "labs/wasm-agent",
       "claim": "Multi-turn benchmarks use twelve immutable ordered lifecycle fixtures and remain non-rankable until Master:frontier, Codex, Claude Code, and Gemini CLI each prove native isolated continuation under identical model, route, tools, budgets, and attribution.",
       "whenToUse": "After changing session reconstruction, compaction, interruption/resume, completed-action receipts, session fixtures, adapter continuation, or multi-turn comparability gates.",
-      "command": ["python3", "labs/wasm-agent/prove-session-continuity-contract.py"],
+      "command": [
+        "python3",
+        "labs/wasm-agent/prove-session-continuity-contract.py"
+      ],
       "timeoutSec": 30,
-      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
-      "evidenceClasses": ["static"],
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static"
+      ],
       "passRequires": [
         "the exact twelve required lifecycle cases are present with ordered user, assistant, tool, restart, interruption, compaction, checkpoint, and fork events where applicable",
         "every fixture carries session, process, branch, turn, task-transition, receipt, terminal, route, authority, budget, and attribution contracts",
@@ -3316,18 +3951,29 @@
       "owner": "plugins/wasm-agent/server/master_frontier/v5",
       "claim": "Master:frontier V5 has a compact reliable tool loop with server-owned restart continuity, exact route/task authority, bounded repository and browser evidence, answer-satisfaction repair, preconditioned transactional patches, registered checks, and revision-bound diff/test/proof receipts.",
       "whenToUse": "After changing V5 context, trajectory, continuity, authority, repository read/edit/check/diff primitives, proof gating, browser continuation, or agent-trajectory learning contracts.",
-      "command": ["python3", "tools/context/prove-master-frontier-v5-evolution.py"],
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-v5-evolution.py"
+      ],
       "timeoutSec": 180,
-      "cost": {"tokenCost": "tiny", "runtimeCost": "low", "rebuildCost": "none", "confidence": "high"},
-      "evidenceClasses": ["static", "behavioral"],
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
       "passRequires": [
         "model-visible tools are the exact intersection of route capabilities, declared task authority, coherent request/declared workflow classes, nonempty write roots, evidence modality, exact runtime entity scope, planner block state, and complete workflow capability minima; capability presence never selects runtime intent; ambiguous model_decision turns expose only bounded read-only evidence tools so the LLM, not lexical harness routing, chooses direct answer, source, memory, runtime, or browser evidence",
         "repository reads reach arbitrary late line ranges without prefix materialization, and streaming search stays route-scoped under its route-owned scan ceiling while sharing sensitive-path redaction and denying secrets, binaries, generated state, databases, and private keys",
-      "V5 patches require an observed preimage or explicit absence; create operations automatically bind expected_absent=true because the serialized transaction still atomically rejects existing targets, while replace/delete/move bind observed SHA preimages; model-relative paths that repeat the configured workspace root are canonicalized instead of creating a nested workspace; autonomous implementation's native edit schema omits redundant dry_run because the transaction validates atomically, while execution remains fail-closed if an undeclared dry run arrives; explicitly temporary paths, temporary-directory targets, and empty or placeholder-only creates are rejected as non-durable artifacts; any failed tool observation becomes the current typed repair signal and discards remaining calls selected in the same provider batch before that failure was visible; mutations use fsynced, recoverable multi-file transactions whose durable journal blocks new mutations when corrupt",
+        "V5 patches require an observed preimage or explicit absence; create operations automatically bind expected_absent=true because the serialized transaction still atomically rejects existing targets, while replace/delete/move bind observed SHA preimages; model-relative paths that repeat the configured workspace root are canonicalized instead of creating a nested workspace; autonomous implementation's native edit schema omits redundant dry_run because the transaction validates atomically, while execution remains fail-closed if an undeclared dry run arrives; explicitly temporary paths, temporary-directory targets, and empty or placeholder-only creates are rejected as non-durable artifacts; any failed tool observation becomes the current typed repair signal and discards remaining calls selected in the same provider batch before that failure was visible; mutations use fsynced, recoverable multi-file transactions whose durable journal blocks new mutations when corrupt",
         "focused checks execute only registered argv without a shell or inherited secrets, retain bounded output rings, and return by an absolute deadline with typed process-leak evidence even when an escaped descendant retains a pipe",
         "diff proof includes modified, staged, deleted, renamed, and untracked paths and fails closed if its machine receipt is truncated",
         "implementation cannot finalize without a real mutation unless fresh successful source evidence, a passing registered revision-zero check, no open outcomes, and a model-owned blocked/rejected decision jointly prove that the requested patch is unjustified; ordinary mutation-free finals remain implementation_incomplete; advisory call targets never terminate or force a workflow transition in autonomous implementation, while explicit hard route budgets, cooperative per-run cancellation, task leases, provider/tool failures, and the final-answer mutation gate remain enforced; a successful exact read may retire broad search, but model-declared open search or read outcomes preserve the corresponding bounded tool until resolved while novelty still rejects equivalent repeated actions; three consecutive discovery actions rejected as non-progress retire search/read even when stale open outcomes remain, without terminating the task or removing checkpoint/edit/verification; three consecutive completed checkpoint actions temporarily retire checkpoint until any non-checkpoint tool action reopens it, preventing planning prose from becoming an infinite workflow; once durable receipts prove the route-selected owner is fully covered or a passing revision-zero baseline check follows a selected model decision with no open read outcome, exhausted read tools and stale queued discovery batches are withdrawn while edit remains available and checkpoint, mutation, verification, and final-answer freedom remain; only a passing check after a real mutation revision may seal further edits; each mutation binds postimages and completion requires a passing check, covering diff, and scoped proof at the same route-wide Git HEAD/status/dirty-content fingerprint, with route-declared source exclusions removing generated-artifact churn while undeclared files still invalidate identity",
-      "server-owned checkpoints are digest, user, session, route-contract, and source-run bound; strict restore rejects every scope mismatch, while a separately validated stale-route replacement accepts only a signed checkpoint whose principal, session, route ID, and source run still match, preserves only its root objective and lineage, starts a zero-revision trajectory without replaying old evidence or authority, records stale_checkpoint_replaced, recalculates current authority through the existing grounded lineage gate, and persists a fresh current-contract checkpoint so contextual continue does not abort; checkpoints omit raw source/diff/output while retaining content-free read SHA receipts so safe edit preconditions bind after restart across canonical relative or absolute route paths; prefix-code operation paths; reject mutations that cannot fit the restart ledger; and reconcile durable action events idempotently",
+        "server-owned checkpoints are digest, user, session, route-contract, and source-run bound; strict restore rejects every scope mismatch, while a separately validated stale-route replacement accepts only a signed checkpoint whose principal, session, route ID, and source run still match, preserves only its root objective and lineage, starts a zero-revision trajectory without replaying old evidence or authority, records stale_checkpoint_replaced, recalculates current authority through the existing grounded lineage gate, and persists a fresh current-contract checkpoint so contextual continue does not abort; checkpoints omit raw source/diff/output while retaining content-free read SHA receipts so safe edit preconditions bind after restart across canonical relative or absolute route paths; prefix-code operation paths; reject mutations that cannot fit the restart ledger; and reconcile durable action events idempotently",
         "decision, tool, retry, wall-time, route-call, provider-token, and proof-repair counters survive restart; provider usage keeps a bounded recent receipt ring plus durable cumulative calls/tokens that remain exact beyond sixteen calls and drive hard enforcement, pre-call reservation, and final diagnostics; provider diagnostics distinguish durable attempts from successful metered calls and never call missing usage exact; head tokens are per-call, provider/call targets are advisory by default, strict hard budgets require a positive route-owned reservation and subtract the larger host-derived bound over actual messages/tool schemas before enforcing cumulative allowance and measurable usage; zero and sub-second wall limits remain exact; successful retry recovery ends temporary evidence clipping, resets only the consecutive-incident allowance, and never resets the bounded durable total retry count",
         "the avatar browser requests advisory provider accounting rather than claiming a strict input-token cap it cannot measure before dispatch",
         "the session-derived tool-directive and empty-answer fixtures are classified as unsatisfactory; V5 asks the same head to repair them from accumulated evidence and returns an explicit honest unsatisfactory fallback rather than turning repeated answer-quality misses into infrastructure failure",
@@ -3512,8 +4158,8 @@
     {
       "id": "wasm-agent-external-widget-reload-lifecycle",
       "owner": "plugins/wasm-agent/public/modules",
-      "claim": "Persisted open external widgets stay hidden until their lazy content remounts after reload, then become visible without an empty shell.",
-      "whenToUse": "After changing external app hosts, widget visibility, saved layout hydration, lazy module mounting, or when an open widget reloads with an empty body.",
+      "claim": "External widgets have one lazy mount owner and ordered open, minimize, and close transitions, including persisted reload hydration, so stale lifecycle work cannot leave an empty shell.",
+      "whenToUse": "After changing external app hosts, widget visibility, saved layout hydration, lazy module mounting, lifecycle ordering, or when an open widget reloads or reopens with an empty body.",
       "command": [
         "bash",
         "-lc",
@@ -3534,6 +4180,8 @@
         "external hosts begin in an explicitly unmounted hidden state",
         "only persisted open external apps are selected for hydration",
         "mounting is deduplicated and failed mounts remain hidden with bounded diagnostics",
+        "concurrent mount callers share one in-flight mount promise",
+        "open, minimize, and close transitions are serialized per widget so stale work cannot override the latest requested state",
         "successful mounts remove the unmounted state before one final layout pass",
         "an explicitly open unpositioned widget remains open across layout synchronization while ambiguous unpositioned legacy state closes",
         "closing restores the unmounted state and releases the module lifecycle"
@@ -3573,7 +4221,11 @@
         "rebuildCost": "none",
         "confidence": "high"
       },
-      "evidenceClasses": ["runtime", "behavioral", "production"],
+      "evidenceClasses": [
+        "runtime",
+        "behavioral",
+        "production"
+      ],
       "passRequires": [
         "the production request authenticates without exposing credentials",
         "the run remains within the declared hard call and token budgets",
@@ -3776,6 +4428,195 @@
       ]
     },
     {
+      "id": "master-frontier-space-widget-discovery-simulation",
+      "owner": "plugins/wasm-agent",
+      "claim": "A V6 client action can inspect one bounded authenticated-space catalog while the active surface has no widgets, identify a route-authorized widget owner, and then open that exact space and widget with three correlated commands and no duplicate lookup.",
+      "whenToUse": "After changing client space catalogs, widget ownership projection, read-only setup observations, goal-contract review, space opening, active-surface refresh, or dependent client actions.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py",
+        "V6OwnedControllerTests.test_catalog_discovers_widget_owner_before_dependent_space_and_widget_actions"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the simulated live client begins in space-home with an empty active-surface widget manifest",
+        "one read-only client.space.catalog command returns client.space.catalog proof and identifies space-admin as a Browser owner",
+        "the next provider context contains the bounded space-admin observation",
+        "the reviewed dependent DAG opens that exact space before opening Browser",
+        "all terminal action goals are satisfied with zero completion gaps",
+        "the command sequence is exactly space_catalog, space_open, open_widget"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/modules/client-presence.js",
+        "plugins/wasm-agent/public/modules/space-control.js",
+        "plugins/wasm-agent/server/live_clients.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/server/master_frontier/v6/adapters.py",
+        "plugins/wasm-agent/server/master_frontier/v6/controller.py",
+        "plugins/wasm-agent/server/master_frontier/v6/v5_bridge.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first catalog, authority projection, setup-observation, ordering, or proof assertion before changing prompts.",
+        "After deployment, run the unchanged ownership-discovery request against the live production Electron client."
+      ]
+    },
+    {
+      "id": "master-frontier-space-widget-discovery-production",
+      "owner": "plugins/wasm-agent+tools/context",
+      "claim": "A production V6 turn starting in space-home discovers space-admin as the route-authorized Browser owner, opens that exact space, opens Browser once, and completes without timeout, retry, stall, or completion gap.",
+      "whenToUse": "After deploying space catalogs, active-surface receipt advancement, V6 client timeout policy, goal review, or live Electron client-action changes.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-v6-space-widget-discovery.py"
+      ],
+      "timeoutSec": 600,
+      "cost": {
+        "tokenCost": "large",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral",
+        "production"
+      ],
+      "passRequires": [
+        "the authenticated live Electron renderer begins in space-home with no Browser in its active-surface manifest",
+        "one client.space.catalog receipt identifies space-admin as a Browser owner",
+        "exactly one client.space.open command uses that returned owner and advances the cached active surface from its proved result",
+        "exactly one client.widget.open command returns client.widget.visible",
+        "the local capability order is exactly catalog, space open, widget open and every tool succeeds",
+        "exactly two reviewed action goals are satisfied with zero completion gaps, no stall diagnostic, and exactly four provider calls"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v6-space-widget-discovery.json",
+        "persisted production V6 run and correlated native-control receipts"
+      ],
+      "invalidatedBy": [
+        "tools/context/prove-master-frontier-v6-space-widget-discovery.py",
+        "plugins/wasm-agent/public/app.js",
+        "plugins/wasm-agent/public/modules/client-presence.js",
+        "plugins/wasm-agent/public/modules/space-control.js",
+        "plugins/wasm-agent/server/live_clients.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/server/master_frontier/v6/**",
+        "production deployment or live Electron runtime change"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the first catalog, owner, timeout, command-order, goal, or proof mismatch before rerunning.",
+        "Restore space-home only when a fresh explicitly authorized production proof is required."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-claim-bound-finalization",
+      "owner": "plugins/wasm-agent/server/master_frontier/v6",
+      "claim": "Non-conceptual V6 answers bind material claims to route evidence or successful viewed operation receipts, enforce source/runtime/action/verification scope and capability-declared runtime proof, and use observed product prompts only as generic regression fixtures.",
+      "whenToUse": "After changing V6 planning, task authority, capability proof, final-answer parsing, evidence viewing, completion gates, or any weak answer that claimed live state from route metadata.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/master_frontier_v6_claim_gate.test.py"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "a prose-only non-conceptual final is rejected before it can reach the user",
+        "a runtime claim cannot cite source evidence or an unviewed operation",
+        "a runtime claim completes only after a successful compatible observation whose receipt contains capability-declared proof",
+        "a route claim cites exact route-contract evidence",
+        "the exact observed Windows inventory fixture requires generic client-inspection authority rather than a Windows-specific capability selector",
+        "an ambiguous diagnosis remains in read-only evidence-selection authority instead of inheriting repository-read completion"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/planner.py",
+        "plugins/wasm-agent/server/master_frontier/authority.py",
+        "plugins/wasm-agent/server/master_frontier/v6/claim_gate.py",
+        "plugins/wasm-agent/server/master_frontier/v6/controller.py",
+        "plugins/wasm-agent/server/master_frontier/v6/kernel.py",
+        "plugins/wasm-agent/server/master_frontier/v6/adapters.py",
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_claim_gate.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first scope, evidence-reference, viewed-operation, or proof mismatch without adding prompt words to runtime routing.",
+        "After deployment, rerun the unchanged live Windows inventory request and inspect the persisted final_claims plus UIA receipt before claiming production behavior."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-stall-diagnostic-closeout",
+      "owner": "plugins/wasm-agent/server/master_frontier/v6",
+      "claim": "A real ambiguous V6 semantic stall makes exactly one bounded tool-free diagnostic inference over recorded stall evidence, returns ranked explicitly inferred causes plus one read-only next check, leaves the action blocked, and cannot reopen the execution loop; typed action failures remain deterministic and a failed diagnostic provider produces one unmetered fallback closeout without a fourth call.",
+      "whenToUse": "After changing V6 no-progress detection, diagnostic packets or prompts, provider-call accounting, active-client projections, typed action failures, or terminal blocked answers.",
+      "command": [
+        "python3",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py",
+        "V6OwnedControllerTests.test_space_home_widget_action_finishes_with_explicit_unavailable_result",
+        "V6OwnedControllerTests.test_ambiguous_stall_gets_one_tool_free_ranked_diagnostic_closeout",
+        "V6OwnedControllerTests.test_stall_diagnostic_provider_failure_uses_one_deterministic_closeout"
+      ],
+      "timeoutSec": 15,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "a typed active-surface widget failure finishes directly with no diagnostic inference",
+        "an ambiguous repeated-final stall projects active space, available widgets, capabilities, and unresolved requirements into one STALL/1 context",
+        "the diagnostic inference exposes no tools, uses tool_choice none, and caps output at 600 tokens",
+        "the human closeout ranks one to three hypotheses, labels them inferred rather than verified, names one read-only next check, and leaves state blocked",
+        "the successful closeout records all three provider calls and exact usage",
+        "a diagnostic provider failure produces one deterministic closeout, records three attempts and two successes, marks aggregate usage inexact, and makes no fourth call"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/server/master_frontier/v6/controller.py",
+        "plugins/wasm-agent/server/master_frontier/v6/stall_diagnostic.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_stall_diagnostic.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "Inspect the first packet, provider-body, blocked-state, or call-accounting mismatch before changing the diagnostic prompt.",
+        "After deployment, exercise one naturally occurring ambiguous stall and inspect its persisted STALL/1 context and terminal answer before claiming production readiness."
+      ]
+    },
+    {
       "id": "master-frontier-v6-persisted-stall-fixture",
       "owner": "plugins/wasm-agent/server/master_frontier+tools/context",
       "claim": "An explicitly authorized production Chrome client can inject one bounded V6 semantic-stall fixture through the normal Frontier stream, persist its run and timeline, render the concrete missing requirement, and consume no provider call or token.",
@@ -3820,6 +4661,290 @@
       "nextSuggestedSteps": [
         "Inspect the first missing persisted event or fallback assertion before changing the fixture contract.",
         "Treat unavailable CDP or a non-admin client as blocked rather than weakening authorization."
+      ]
+    },
+    {
+      "id": "android-voice-claim-risk-proof-gate",
+      "owner": "docs/context+native/android+native/windows",
+      "claim": "Fresh Android voice journey evidence satisfies the production claim's independent authority, installed-runtime, behavior, completeness, safety, responsiveness, threshold, and latency gates.",
+      "whenToUse": "After refreshing Android voice readiness evidence or before making an Android voice production-readiness claim.",
+      "command": [
+        "python3",
+        "tools/context/prove-android-voice-readiness-claim.py"
+      ],
+      "timeoutSec": 10,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "production",
+        "runtime",
+        "behavioral"
+      ],
+      "passRequires": [
+        "authenticated production native-control, Windows hot-shell, and installed Android wake-loop evidence are fresh and independently artifact-bound",
+        "the Android voice journey status and all required child evidence pass",
+        "all required voice metrics are measured rather than inferred",
+        "at least three positive and three negative trials pass with zero duplicate wakes, false wakes, or unauthorized actions",
+        "the effective wake threshold is at least 0.999 and responsiveness is healthy",
+        "avatar, listening, transcription, routing, and acknowledgement latency stay within the matrix thresholds"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/android-voice-claim-receipt.json",
+        "reports/context/latest/android-voice-claim-gate-result.json"
+      ],
+      "invalidatedBy": [
+        "docs/context/CLAIM_RISK_PROOF_MATRIX.json",
+        "tools/context/prove-claim-risk-proof.py",
+        "tools/context/prove-android-voice-readiness-claim.py",
+        "tools/context/evaluate-wasm-agent-product-readiness.py",
+        "reports/context/latest/wasm-agent-product-readiness-result.json",
+        "reports/context/latest/production-native-control-authority.json",
+        "reports/windows/latest/hot-shell-proof-result.json",
+        "reports/android/wake-shell-v2/latest-shell-v2-wake-loop.json"
+      ],
+      "nextSuggestedSteps": [
+        "Refresh the first stale or failing child evidence through the authorized Windows bridge.",
+        "Do not weaken thresholds or fill missing metrics with defaults to obtain a pass."
+      ]
+    },
+    {
+      "id": "claim-risk-proof-gate-e2e",
+      "owner": "docs/context",
+      "claim": "The production-claim gate accepts a complete fresh independent artifact-bound receipt and rejects stale, incomplete, below-threshold, malformed, or structurally invalid evidence.",
+      "whenToUse": "After changing the claim-risk-proof matrix, evaluator, evidence thresholds, freshness rules, or end-to-end fault campaign.",
+      "command": [
+        "python3",
+        "tools/context/prove-claim-risk-proof.py",
+        "--self-test"
+      ],
+      "timeoutSec": 10,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "the matrix binds the claim to owner, risk tolerance, controls, independent evidence, freshness, thresholds, and invalidation",
+        "the complete three-class reference receipt passes",
+        "stale evidence is rejected",
+        "a missing evidence class and insufficient independent groups are rejected",
+        "a numeric acceptance-threshold regression is rejected",
+        "a valid-looking but mismatched artifact SHA-256 digest is rejected",
+        "an invalid or empty matrix fails closed"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/claim-risk-proof-result.json"
+      ],
+      "invalidatedBy": [
+        "docs/context/CLAIM_RISK_PROOF_MATRIX.json",
+        "docs/context/HARNESS.md",
+        "tools/context/prove-claim-risk-proof.py",
+        "plugins/wasm-agent/tests/claim_risk_proof_e2e.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "Fix the first failed contract or injected-failure case before relying on the gate.",
+        "Add real product claims only with their own runtime and production evidence; never reuse the synthetic reference receipt."
+      ]
+    },
+    {
+      "id": "windows-installed-update-reconnect",
+      "owner": "native/windows",
+      "claim": "An installed Windows update is accepted only when the exact production device reconnects on the expected build through the authenticated registry.",
+      "whenToUse": "Start before activating a silent Windows update with --require-transition, or run without it to verify that an expected installed build is currently connected.",
+      "command": [
+        "python3",
+        "tools/windows/prove-update-reconnect.py",
+        "--expected-build",
+        "EXPECTED_BUILD_ID",
+        "--device-id",
+        "EXPECTED_DEVICE_ID",
+        "--require-transition"
+      ],
+      "timeoutSec": 240,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "medium",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "runtime",
+        "behavioral",
+        "production"
+      ],
+      "passRequires": [
+        "the authenticated production client registry is the authority",
+        "the exact requested device is observed absent, offline, or on another build before reconnect when --require-transition is set",
+        "the exact expected build reconnects as a live Electron client",
+        "the production route is https://wa.colmeio.com/home?native=electron",
+        "the accepted heartbeat age is at most 30 seconds",
+        "one bounded JSON receipt records timestamps, sample count, transition state, device, build, route, and transport without credentials"
+      ],
+      "outputArtifacts": [
+        "reports/windows/latest/windows-update-reconnect.json"
+      ],
+      "invalidatedBy": [
+        "tools/windows/prove-update-reconnect.py",
+        "tools/windows/hot_shell_common.py",
+        "plugins/wasm-agent/server/live_clients.py",
+        "native/windows/src/main.js"
+      ],
+      "nextSuggestedSteps": [
+        "If no transition is observed, start the watcher before activating the update.",
+        "If the expected build never reconnects, inspect supervisor update-timeline.json and the installed build metadata before retrying."
+      ]
+    },
+    {
+      "id": "cloud-module-refresh-contract",
+      "owner": "plugins/wasm-agent",
+      "claim": "The model can collect bounded client diagnostics and schedule a same-origin production module refresh without rebuilding or replacing the native shell.",
+      "whenToUse": "After changing cloud PWA modules, client capability routing, runtime diagnostics, or reload behavior and before considering a Windows rebuild.",
+      "command": [
+        "bash",
+        "-lc",
+        "cd plugins/wasm-agent && first=$(node scripts/generate-module-release.mjs) && second=$(node scripts/generate-module-release.mjs) && test \"$first\" = \"$second\" && node scripts/generate-module-release.mjs --check && node tests/module_release_deploy_gate.test.mjs && node --experimental-vm-modules public/modules/module-release.test.mjs && node --experimental-vm-modules public/modules/runtime-refresh.test.mjs && node --experimental-vm-modules public/modules/client-observability.test.mjs && node --experimental-vm-modules public/modules/client-presence.test.mjs && python3 tests/live_clients.test.py && python3 tests/master_frontier_client_ui_actions.test.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral"
+      ],
+      "passRequires": [
+        "refresh is restricted to https://wa.colmeio.com",
+        "refresh returns client.runtime.refresh.scheduled before replacing the document",
+        "diagnostics are bounded and redacted",
+        "the live-client registry, route contract, V6 adapter, and V5 bridge expose the same stable operations",
+        "no native installer or unrestricted downloaded code path is introduced"
+      ],
+      "outputArtifacts": [
+        "command stdout/stderr"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/public/modules/runtime-refresh.js",
+        "plugins/wasm-agent/public/modules/module-release.js",
+        "plugins/wasm-agent/public/module-release.json",
+        "plugins/wasm-agent/scripts/generate-module-release.mjs",
+        "plugins/wasm-agent/scripts/deploy-cloud-modules.sh",
+        "plugins/wasm-agent/systemd/wasm-agent-production.service",
+        "plugins/wasm-agent/tests/module_release_deploy_gate.test.mjs",
+        "plugins/wasm-agent/public/app-loader.js",
+        "plugins/wasm-agent/public/sw.js",
+        "plugins/wasm-agent/public/modules/client-observability.js",
+        "plugins/wasm-agent/public/modules/client-presence.js",
+        "plugins/wasm-agent/server/live_clients.py",
+        "plugins/wasm-agent/server/master_frontier/client_ui_actions.py",
+        "plugins/wasm-agent/server/master_frontier/v6/adapters.py",
+        "plugins/wasm-agent/server/master_frontier/v6/v5_bridge.py",
+        "plugins/wasm-agent/server/agent_route_contracts.json"
+      ],
+      "nextSuggestedSteps": [
+        "After source proof, deploy the cloud PWA and invoke client.runtime.refresh on the exact live Electron renderer.",
+        "Require a newer live heartbeat and client.runtime.diagnose receipt before claiming runtime activation."
+      ]
+    },
+    {
+      "id": "mf-v7-procedure-memory-pilot",
+      "owner": "labs/wasm-agent/v7-procedure-kernel-plugin",
+      "claim": "A disposable plugin can compile proof-complete V6 browser and Windows trajectories into account-scoped declarative procedures, reuse them in the same or a later session without provider inference after a trusted structured match, require fresh proof, fail closed on ambiguity, strip undeclared arguments, and prune only the incompatible account-scoped procedure.",
+      "whenToUse": "Before any MF-v7 bootstrap or after changing procedure identity, compilation, matching, storage, compact maps, cross-session reuse, proof validation, or invalidation.",
+      "command": [
+        "python3",
+        "labs/wasm-agent/v7-procedure-kernel-plugin/prove.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral",
+        "runtime"
+      ],
+      "passRequires": [
+        "proof-incomplete trajectories cannot compile and candidates cannot execute before calibration",
+        "same-session and cross-session invocations each execute exactly once and require a fresh proof receipt",
+        "account scope participates in procedure identity so pruning one account cannot prune another",
+        "ambiguous, forbidden, incompatible, and undeclared inputs fail closed or are excluded",
+        "the compact map remains bounded and includes both browser CDP and a captured live Windows-list trajectory",
+        "the benchmark explicitly excludes natural-language classification and native latency from its zero-provider procedure-lane result"
+      ],
+      "outputArtifacts": [
+        "labs/wasm-agent/v7-procedure-kernel-plugin/benchmark-result.json",
+        "labs/wasm-agent/v7-procedure-kernel-plugin/live-results/windows-list-cold.json",
+        "labs/wasm-agent/v7-procedure-kernel-plugin/SEMANTIC_ROUTER_PRUNE.md",
+        "labs/wasm-agent/v7-procedure-kernel-plugin/semantic-ab-result.json",
+        "labs/wasm-agent/v7-procedure-kernel-plugin/semantic-glm-result.json",
+        "labs/wasm-agent/v7-procedure-kernel-plugin/semantic-compiler-result.json"
+      ],
+      "invalidatedBy": [
+        "labs/wasm-agent/v7-procedure-kernel-plugin/**"
+      ],
+      "nextSuggestedSteps": [
+        "Do not create an MF-v7 production selector from this pilot; the learned-example router failed held-out coverage while both brokered GLM candidates failed the zero-unsafe-route gate, so all were pruned.",
+        "Retain the structured procedure result only as isolated evidence until a future semantic mechanism independently proves zero unsafe routes and adequate held-out coverage."
+      ]
+    },
+    {
+      "id": "master-frontier-v6-exact-read-procedure-memory",
+      "owner": "plugins/wasm-agent/server/master_frontier/v6/procedure_memory.py",
+      "claim": "V6 can calibrate an exact account-, route-, topology-, and capability-bound terminal read after two independent proof-complete provider runs, then repeat it with zero provider calls while executing the live capability once and requiring fresh declared proof.",
+      "whenToUse": "After changing V6 procedure memory, hosted-controller replay/harvest wiring, route or topology digests, terminal read capability contracts, persistence, or rollback behavior.",
+      "command": [
+        "python3",
+        "tools/context/prove-master-frontier-v6-procedure-memory.py"
+      ],
+      "timeoutSec": 30,
+      "cost": {
+        "tokenCost": "tiny",
+        "runtimeCost": "low",
+        "rebuildCost": "none",
+        "confidence": "high"
+      },
+      "evidenceClasses": [
+        "static",
+        "behavioral",
+        "runtime"
+      ],
+      "passRequires": [
+        "two distinct proof-complete runs are required before promotion and one run cannot self-calibrate",
+        "the third exact repeat uses zero provider calls, executes exactly one fresh native read, returns its fresh answer, and retains declared proof",
+        "account, route, objective text, active topology, and capability contract drift cannot reuse an entry",
+        "writes, multi-operation trajectories, required-argument reads, paraphrases, missing proof, and failed receipts never gain replay authority",
+        "memory failure or MF_V6_PROCEDURE_MEMORY=0 leaves the ordinary V6 provider path available"
+      ],
+      "outputArtifacts": [
+        "reports/context/latest/master-frontier-v6-procedure-memory.json"
+      ],
+      "invalidatedBy": [
+        "plugins/wasm-agent/server/master_frontier/controller_v6.py",
+        "plugins/wasm-agent/server/master_frontier/v6/procedure_memory.py",
+        "plugins/wasm-agent/server/master_frontier/v6/persistence.py",
+        "plugins/wasm-agent/server/master_frontier/v6/adapters.py",
+        "plugins/wasm-agent/server/master_frontier/v6/client_topology.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_procedure_memory.test.py",
+        "plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py"
+      ],
+      "nextSuggestedSteps": [
+        "After local proof, hot-load the cloud worker and run the identical Windows-list objective three times under the same account and topology.",
+        "Require run three to show provider_calls=0, procedure_memory.state=replayed, one fresh native command, a correct fresh answer, and windows.desktop.top_level_windows proof before claiming production activation."
       ]
     },
     {

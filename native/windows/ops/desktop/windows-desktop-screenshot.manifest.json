@@ -1,0 +1,14 @@
+{
+  "schema": "hermes.wasm_agent.hot_operation_manifest.v1",
+  "name": "capture_windows_desktop_screenshot",
+  "version": "20260827T1600",
+  "entry": "windows-desktop-screenshot.js",
+  "operationId": "capture_windows_desktop_screenshot",
+  "requiredNativeCapabilities": ["native.capabilities.hotOps.v1", "native.capabilities.boundedCommand.v1"],
+  "capabilities": [],
+  "timeoutMs": 20000,
+  "inputsSchema": {"type": "object", "additionalProperties": false},
+  "outputsSchema": {"type": "object", "required": ["ok", "operation", "artifact", "proof"]},
+  "safetyLimits": {"network": false, "executable": "powershell.exe", "capture": "virtual desktop", "modelPayload": "metadata only", "containsSensitivePixels": true, "maxOutputBytes": 16384},
+  "rollback": {"mode": "delete artifact by explicit later action"}
+}

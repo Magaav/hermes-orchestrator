@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from typing import Any
 
 
@@ -66,8 +67,21 @@ def measure(messages: list[dict[str, str]], tools: list[dict[str, Any]], previou
 
 def attach_usage(measurement: dict[str, Any], usage: Any) -> dict[str, Any]:
     observed = usage if isinstance(usage, dict) else {}
-    return {**measurement, "provider_usage": {
+    provider_usage = {
         key: observed[key]
         for key in ("prompt_tokens", "input_tokens", "completion_tokens", "output_tokens", "total_tokens", "cached_input_tokens", "reasoning_tokens")
         if observed.get(key) is not None
-    }}
+    }
+    provider_input = int(provider_usage.get("input_tokens") or provider_usage.get("prompt_tokens") or 0)
+    projection_estimate = math.ceil(int(measurement.get("serialized_chars") or 0) / 4)
+    return {
+        **measurement,
+        "provider_usage": provider_usage,
+        "transport_accounting": {
+            "provider_input_tokens": provider_input,
+            "visible_projection_tokens_estimate": projection_estimate,
+            "transport_overhead_tokens_estimate": max(0, provider_input - projection_estimate),
+            "estimate_method": "utf8_chars_div_4_ceiling",
+            "exact": False,
+        },
+    }

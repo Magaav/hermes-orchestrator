@@ -1,0 +1,15 @@
+{
+  "schema": "mf-v7.pilot.live-baseline.v1",
+  "run_id": "wa_run_dac5261e139b4e0ea57218f66f85a61a",
+  "objective": "List the visible top-level Windows application windows and report their application names.",
+  "capability": "client.windows.desktop.windows.list",
+  "required_proof": "windows.desktop.top_level_windows",
+  "provider_calls": 4,
+  "total_tokens": 75893,
+  "latency_ms": 46513,
+  "decisions": ["discover", "execute", "final_claims_rejected", "final_claims_repaired"],
+  "fresh_proof_verified": true,
+  "changed_files": [],
+  "classification": "valid_success_with_redundant_discovery_and_answer_repair",
+  "repeat_policy": "do_not_repeat_live_until_compiled-lane-or-v6-hot-path-is-active"
+}

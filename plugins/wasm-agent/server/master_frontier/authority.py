@@ -68,7 +68,7 @@ _CONCRETE_EVIDENCE_CLASSES = {
 _EVIDENCE_CAPABILITY_OPTIONS = {
     "source_investigation": frozenset({REPO_READ}),
     "implementation_planning": frozenset({REPO_READ}),
-    "runtime_inspection": frozenset({RUNTIME_INSPECT, BROWSER_INSPECT}),
+    "runtime_inspection": frozenset({RUNTIME_INSPECT, BROWSER_INSPECT, CLIENT_UI_INSPECT}),
 }
 _WORKFLOW_CAPABILITIES = {
     "implementation": frozenset({REPO_READ, REPO_EDIT, TEST_RUN, PROOF_REPORT}),
@@ -83,6 +83,8 @@ def _clean(value: Any) -> str:
 def _project_request_class(contract: dict[str, Any], objective_kind: str) -> str:
     """Resolve task modality only from host-declared intent/evidence fields."""
     explicit = _clean(contract.get("request_class"))
+    if _clean(objective_kind) == "client_state" and explicit in {"", "conversation"}:
+        return "runtime_inspection"
     if explicit:
         return explicit
     intent = _clean(contract.get("intent") or objective_kind)
@@ -105,7 +107,7 @@ def _project_request_class(contract: dict[str, Any], objective_kind: str) -> str
     return {
         "answer": "conversation",
         "capability_inquiry": "conversation",
-        "diagnosis": "source_investigation",
+        "diagnosis": "model_decision",
         "runtime_inspection": "runtime_inspection",
         "client_action": "client_action",
         "source_investigation": "source_investigation",
@@ -183,6 +185,11 @@ def _runtime_scope_available(route: dict[str, Any]) -> bool:
         return True
     declared = {str(item or "").strip().lower() for item in (route.get("caps") or [])}
     if RUNTIME_INSPECT_UNAVAILABLE in declared:
+        return True
+    client_ui = route.get("client_ui") if isinstance(route.get("client_ui"), dict) else {}
+    if CLIENT_UI_INSPECT in declared and any(
+        str(item or "").strip() for item in (client_ui.get("operations") or [])[:64]
+    ):
         return True
     entities = route.get("entities") if isinstance(route.get("entities"), list) else []
     return any(

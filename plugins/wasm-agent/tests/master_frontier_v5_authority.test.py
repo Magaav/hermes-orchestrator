@@ -272,9 +272,9 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
             "objective": "critisize meta-analysis widget inside realure space",
             "task_contract": {"intent": "diagnosis", "evidence_floor": "route"},
         }, route)
-        self.assertEqual(diagnosis["request_class"], "source_investigation")
+        self.assertEqual(diagnosis["request_class"], "model_decision")
 
-    def test_model_decision_survives_planning_with_read_only_evidence_authority(self) -> None:
+    def test_capability_inquiry_survives_planning_with_read_only_evidence_authority(self) -> None:
         route = {"caps": ["repo.read", "repo.edit", "runtime.inspect", "proof.report"]}
         planned = planner.task_contract({
             "objective": "hello, can you se the Property Photo Cleaner widget?",
@@ -291,11 +291,11 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
             route,
         )
         scoped = {**route, "task_contract": projected}
-        self.assertEqual(projected["intent"], "model_decision")
-        self.assertEqual(projected["request_class"], "model_decision")
+        self.assertEqual(projected["intent"], "capability_inquiry")
+        self.assertEqual(projected["request_class"], "conversation")
         self.assertEqual(
             [item["name"] for item in policy.descriptors_for(scoped)],
-            ["search", "read", "inspect"],
+            ["search", "read"],
         )
         self.assertNotIn("edit", [item["name"] for item in policy.descriptors_for(scoped)])
 
@@ -311,6 +311,19 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
         }, route)
 
         self.assertEqual(projected["request_class"], "runtime_inspection")
+
+    def test_declared_client_state_outranks_generic_conversation_default(self) -> None:
+        projected = authority.project_task_contract({
+            "objective_kind": "client_state",
+            "task_contract": {"request_class": "conversation", "evidence_floor": "runtime"},
+        }, {"caps": ["client.ui.inspect"]})
+        explicit = authority.project_task_contract({
+            "objective_kind": "client_state",
+            "task_contract": {"request_class": "client_action", "evidence_floor": "runtime"},
+        }, {"caps": ["client.ui.inspect", "client.ui.control"]})
+
+        self.assertEqual(projected["request_class"], "runtime_inspection")
+        self.assertEqual(explicit["request_class"], "client_action")
 
     def test_client_action_intent_outranks_its_runtime_evidence_floor(self) -> None:
         projected = authority.project_task_contract({
@@ -339,7 +352,7 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
             "objective_kind": "diagnosis", "evidence_floor": "runtime",
         }, broad_route)
         self.assertEqual(source["request_class"], "source_investigation")
-        self.assertEqual(route_only["request_class"], "source_investigation")
+        self.assertEqual(route_only["request_class"], "model_decision")
         self.assertEqual(runtime["request_class"], "runtime_inspection")
         self.assertEqual(top_level_runtime["request_class"], "runtime_inspection")
 
@@ -364,7 +377,7 @@ class MasterFrontierV5AuthorityTests(unittest.TestCase):
             status = authority.coherence(missing)
             self.assertFalse(status["ok"])
             self.assertEqual(status["code"], "evidence_capability_missing")
-            self.assertEqual(status["required_any"], ["browser.inspect", "runtime.inspect"])
+            self.assertEqual(status["required_any"], ["browser.inspect", "client.ui.inspect", "runtime.inspect"])
 
             source = self.route(root, ["repo.read", "runtime.inspect"], request_class="source_investigation")
             source["task_contract"]["evidence_floor"] = "source"

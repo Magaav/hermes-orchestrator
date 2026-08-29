@@ -295,6 +295,132 @@ function hotOperationArtifacts() {
   const releaseRoot = path.join(publicReleaseRoot, "hot-ops");
   const specs = [
     {
+      id: "windows-private-cdp",
+      platform: "desktop",
+      name: "windowsPrivateCdp",
+      operationName: "open_windows_cdp_incognito",
+      sourceModule: path.join(opsRoot, "desktop", "windows-private-cdp.js"),
+      sourceManifest: path.join(opsRoot, "desktop", "windows-private-cdp.manifest.json"),
+      publicDir: path.join(releaseRoot, "desktop"),
+      publicBase: "/native/releases/hot-ops/desktop",
+      moduleName: "windows-private-cdp.js",
+      manifestName: "windows-private-cdp.manifest.json",
+    },
+    {
+      id: "windows-persistent-cdp",
+      platform: "desktop",
+      name: "windowsPersistentCdp",
+      operationName: "open_windows_cdp_persistent",
+      sourceModule: path.join(opsRoot, "desktop", "windows-private-cdp.js"),
+      sourceManifest: path.join(opsRoot, "desktop", "windows-persistent-cdp.manifest.json"),
+      publicDir: path.join(releaseRoot, "desktop"),
+      publicBase: "/native/releases/hot-ops/desktop",
+      moduleName: "windows-private-cdp.js",
+      manifestName: "windows-persistent-cdp.manifest.json",
+    },
+    {
+      id: "windows-open-apps",
+      platform: "desktop",
+      name: "windowsOpenApps",
+      operationName: "inspect_windows_open_apps",
+      sourceModule: path.join(opsRoot, "desktop", "windows-open-apps.js"),
+      sourceManifest: path.join(opsRoot, "desktop", "windows-open-apps.manifest.json"),
+      publicDir: path.join(releaseRoot, "desktop"),
+      publicBase: "/native/releases/hot-ops/desktop",
+      moduleName: "windows-open-apps.js",
+      manifestName: "windows-open-apps.manifest.json",
+    },
+    {
+      id: "windows-cdp-navigate",
+      platform: "desktop",
+      name: "windowsCdpNavigate",
+      operationName: "navigate_windows_cdp_persistent",
+      sourceModule: path.join(opsRoot, "desktop", "windows-cdp-navigate.js"),
+      sourceManifest: path.join(opsRoot, "desktop", "windows-cdp-navigate.manifest.json"),
+      publicDir: path.join(releaseRoot, "desktop"),
+      publicBase: "/native/releases/hot-ops/desktop",
+      moduleName: "windows-cdp-navigate.js",
+      manifestName: "windows-cdp-navigate.manifest.json",
+    },
+    {
+      id: "windows-cdp-inspect",
+      platform: "desktop",
+      name: "windowsCdpInspect",
+      operationName: "inspect_windows_cdp_persistent",
+      sourceModule: path.join(opsRoot, "desktop", "windows-cdp-control.js"),
+      sourceManifest: path.join(opsRoot, "desktop", "windows-cdp-inspect.manifest.json"),
+      publicDir: path.join(releaseRoot, "desktop"),
+      publicBase: "/native/releases/hot-ops/desktop",
+      moduleName: "windows-cdp-control.js",
+      manifestName: "windows-cdp-inspect.manifest.json",
+    },
+    {
+      id: "windows-cdp-status",
+      platform: "desktop",
+      name: "windowsCdpStatus",
+      operationName: "status_windows_cdp_persistent",
+      sourceModule: path.join(opsRoot, "desktop", "windows-cdp-control.js"),
+      sourceManifest: path.join(opsRoot, "desktop", "windows-cdp-status.manifest.json"),
+      publicDir: path.join(releaseRoot, "desktop"),
+      publicBase: "/native/releases/hot-ops/desktop",
+      moduleName: "windows-cdp-control.js",
+      manifestName: "windows-cdp-status.manifest.json",
+    },
+    {
+      id: "windows-cdp-act",
+      platform: "desktop",
+      name: "windowsCdpAct",
+      operationName: "act_windows_cdp_persistent",
+      sourceModule: path.join(opsRoot, "desktop", "windows-cdp-control.js"),
+      sourceManifest: path.join(opsRoot, "desktop", "windows-cdp-act.manifest.json"),
+      publicDir: path.join(releaseRoot, "desktop"),
+      publicBase: "/native/releases/hot-ops/desktop",
+      moduleName: "windows-cdp-control.js",
+      manifestName: "windows-cdp-act.manifest.json",
+    },
+    {
+      id: "windows-cdp-procedure",
+      platform: "desktop",
+      name: "windowsCdpProcedure",
+      operationName: "execute_windows_cdp_procedure",
+      sourceModule: path.join(opsRoot, "desktop", "windows-cdp-control.js"),
+      sourceManifest: path.join(opsRoot, "desktop", "windows-cdp-procedure.manifest.json"),
+      publicDir: path.join(releaseRoot, "desktop"),
+      publicBase: "/native/releases/hot-ops/desktop",
+      moduleName: "windows-cdp-control.js",
+      manifestName: "windows-cdp-procedure.manifest.json",
+    },
+    {
+      id: "windows-cdp-runtime-inspect",
+      platform: "desktop",
+      name: "windowsCdpRuntimeInspect",
+      operationName: "inspect_windows_cdp_runtime",
+      sourceModule: path.join(opsRoot, "desktop", "windows-cdp-runtime-inspect.js"),
+      sourceManifest: path.join(opsRoot, "desktop", "windows-cdp-runtime-inspect.manifest.json"),
+      publicDir: path.join(releaseRoot, "desktop"),
+      publicBase: "/native/releases/hot-ops/desktop",
+      moduleName: "windows-cdp-runtime-inspect.js",
+      manifestName: "windows-cdp-runtime-inspect.manifest.json",
+      dependencies: [
+        {
+          source: path.join(opsRoot, "desktop", "windows-cdp-control.js"),
+          name: "windows-cdp-control.js",
+        },
+      ],
+    },
+    {
+      id: "windows-desktop-screenshot",
+      platform: "desktop",
+      name: "windowsDesktopScreenshot",
+      operationName: "capture_windows_desktop_screenshot",
+      sourceModule: path.join(opsRoot, "desktop", "windows-desktop-screenshot.js"),
+      sourceManifest: path.join(opsRoot, "desktop", "windows-desktop-screenshot.manifest.json"),
+      publicDir: path.join(releaseRoot, "desktop"),
+      publicBase: "/native/releases/hot-ops/desktop",
+      moduleName: "windows-desktop-screenshot.js",
+      manifestName: "windows-desktop-screenshot.manifest.json",
+    },
+    {
       id: "windows-audio-render-default",
       platform: "audio",
       name: "windowsAudioRenderDefault",
@@ -396,35 +522,35 @@ function hotOperationArtifacts() {
       publishedAt: new Date().toISOString(),
     };
     const manifestTarget = writeJsonArtifact(trustedManifest, path.join(spec.publicDir, spec.manifestName));
+    const dependencyArtifacts = (spec.dependencies || []).map((dependency) => {
+      const target = copyFileArtifact(dependency.source, spec.publicDir);
+      return fileArtifact(target, `${spec.publicBase}/${dependency.name}`, {
+        role: "dependency",
+        targetPath: `${spec.platform}/${dependency.name}`,
+      });
+    }).filter(Boolean);
+    const bundleFiles = [
+      fileArtifact(moduleTarget, `${spec.publicBase}/${spec.moduleName}`, {
+        role: "module",
+        targetPath: `${spec.platform}/${spec.moduleName}`,
+      }),
+      fileArtifact(manifestTarget, `${spec.publicBase}/${spec.manifestName}`, {
+        role: "manifest",
+        targetPath: `${spec.platform}/${spec.manifestName}`,
+      }),
+      ...dependencyArtifacts,
+    ].filter(Boolean);
     artifacts[spec.platform] = artifacts[spec.platform] || {};
     artifacts[spec.platform][spec.name] = {
       platform: spec.platform,
       kind: "windows-hot-op-bundle",
       id: bundleId,
       bundleId,
-      bundleSha: bundleShaForFiles([
-        fileArtifact(moduleTarget, `${spec.publicBase}/${spec.moduleName}`, {
-          role: "module",
-          targetPath: `${spec.platform}/${spec.moduleName}`,
-        }),
-        fileArtifact(manifestTarget, `${spec.publicBase}/${spec.manifestName}`, {
-          role: "manifest",
-          targetPath: `${spec.platform}/${spec.manifestName}`,
-        }),
-      ].filter(Boolean)),
+      bundleSha: bundleShaForFiles(bundleFiles),
       operationName: spec.operationName,
       updateMode: "trusted-hot-op-download",
       runtimeProofStatus: "not-runtime-verified",
-      files: [
-        fileArtifact(moduleTarget, `${spec.publicBase}/${spec.moduleName}`, {
-          role: "module",
-          targetPath: `${spec.platform}/${spec.moduleName}`,
-        }),
-        fileArtifact(manifestTarget, `${spec.publicBase}/${spec.manifestName}`, {
-          role: "manifest",
-          targetPath: `${spec.platform}/${spec.manifestName}`,
-        }),
-      ].filter(Boolean),
+      files: bundleFiles,
     };
   }
   return artifacts;

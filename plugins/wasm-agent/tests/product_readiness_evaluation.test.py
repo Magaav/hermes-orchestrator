@@ -129,7 +129,7 @@ class ProductReadinessEvaluationTests(unittest.TestCase):
     def test_canonical_journey_ids_are_stable_and_ordered(self) -> None:
         self.assertEqual(
             [journey.journey_id for journey in evaluation.JOURNEYS],
-            ["repository-agent", "electron-browser-agent", "android-voice-agent"],
+            ["repository-agent", "android-voice-agent"],
         )
 
     def test_historical_pass_becomes_stale_after_an_invalidator_changes(self) -> None:
@@ -184,7 +184,6 @@ class ProductReadinessEvaluationTests(unittest.TestCase):
         self.assertTrue(report["evaluationCompleted"])
         self.assertFalse(report["ready"])
         self.assertEqual(report["journeys"]["repository-agent"]["status"], "pass")
-        self.assertEqual(report["journeys"]["electron-browser-agent"]["status"], "inconclusive")
         self.assertEqual(report["journeys"]["android-voice-agent"]["status"], "inconclusive")
         self.assertTrue(any(journey["metrics"]["missingMetrics"] for journey in report["journeys"].values()))
 

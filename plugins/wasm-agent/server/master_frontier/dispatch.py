@@ -18,6 +18,17 @@ ALLOWED_CAPS = {
     "proof.report",
 }
 
+PROMPT_WORKSPACE_KEYS = (
+    "route_id",
+    "surface",
+    "owner",
+    "workspace_root",
+    "cwd",
+    "allowed_read_roots",
+    "allowed_write_roots",
+    "allowed_edit_operations",
+)
+
 EXPLICIT_HERMES_RE = re.compile(
     r"\b(?:use|run|call|ask|dispatch|invoke)\s+(?:bounded\s+|the\s+)?hermes\b"
     r"|\bhermes\b.{0,40}\b(?:use|run|call|dispatch|invoke)\b",
@@ -51,6 +62,21 @@ def escalation_reason(action: dict[str, Any]) -> str:
         or action.get("reason")
         or ""
     ).strip(), 500)
+
+
+def prompt_workspace_contract(contract: dict[str, Any]) -> dict[str, Any]:
+    """Project only the filesystem authority Hermes needs into its prompt."""
+    projected: dict[str, Any] = {}
+    for key in PROMPT_WORKSPACE_KEYS:
+        value = contract.get(key)
+        if isinstance(value, list):
+            items = [route_contracts.clipped(str(item or "").strip(), 300) for item in value[:12]]
+            value = [item for item in items if item]
+        elif value not in (None, ""):
+            value = route_contracts.clipped(str(value).strip(), 500)
+        if value not in (None, "", []):
+            projected[key] = value
+    return projected
 
 
 def action_text(action: dict[str, Any], envelope: dict[str, Any]) -> str:
@@ -114,4 +140,3 @@ def explicit_hermes_requested(envelope: dict[str, Any]) -> bool:
         if EXPLICIT_HERMES_RE.search(text or ""):
             return True
     return False
-

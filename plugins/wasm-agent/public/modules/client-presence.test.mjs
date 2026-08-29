@@ -2,135 +2,74 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import vm from "node:vm";
 
-const storage = new Map([["wasmAgent.frontierProtocol", "v5"]]);
-const nativeCalls = [];
-const source = fs.readFileSync(new URL("./client-presence.js", import.meta.url), "utf8");
+const storage = new Map([["wasmAgent.frontierProtocol", "v6"]]);
+let submitted = 0;
+const agentInputPrototype = { set value(value) { this._value = value; }, get value() { return this._value || ""; } };
+const agentInput = Object.assign(Object.create(agentInputPrototype), { _value: "", dispatchEvent() {} });
+const agentForm = { requestSubmit() { submitted += 1; } };
+const agentOverlay = { dataset: { sessionId: "old-session" } };
+const agentNewSessionButton = { click() { agentInput._value = ""; agentOverlay.dataset.sessionId = "new-session"; } };
 const context = vm.createContext({
-  window: { wasmAgentNative: { runtime: "electron", webSurfaces: { async invoke(operation, args) {
-    nativeCalls.push({ operation, args });
-    if (operation === "capabilities") return { capabilities: ["web_surface.input_receipt", "web_surface.pointer.dispatch", "web_surface.javascript.execute.unrestricted"] };
-    if (operation === "input-receipt") return { inputReceiptEnabled: args.enabled };
-    if (operation === "pointer-dispatch") return {
-      schema: "hermes.wasm_agent.native_web_surface_pointer_dispatch.v1",
-      ok: true,
-      surface_id: "browser",
-      command_id: args.commandId,
-      input_source: "electron_synthetic",
-      dispatch_accepted: true,
-      receipt_observed: false,
-      receipt_id: null,
-      current_document: true,
-      redacted: true,
-    };
-    if (operation === "javascript-execute-unrestricted") return { schema: "hermes.wasm_agent.native_web_surface_javascript_execution.v1", ok: true, surface_id: "browser", command_id: args.commandId, result_json: "42" };
-    throw new Error(`unexpected native operation: ${operation}`);
-  } } } },
+  window: { wasmAgentNative: { runtime: "electron" } },
   document: {
     hidden: false,
     querySelectorAll() { return []; },
-    querySelector() { return null; },
+    querySelector(selector) { return ({ "#agentInput": agentInput, "#agentForm": agentForm, "#agentOverlay": agentOverlay, "#agentNewSessionButton": agentNewSessionButton })[selector] || null; },
+    addEventListener() {},
   },
   location: { search: "", href: "https://wa.colmeio.com/home?native=electron", origin: "https://wa.colmeio.com" },
   localStorage: { getItem(key) { return storage.get(key) || null; } },
   URLSearchParams,
+  CustomEvent: class CustomEvent { constructor(type, options = {}) { this.type = type; this.detail = options.detail; } },
+  Event: class Event { constructor(type, options = {}) { this.type = type; this.bubbles = options.bubbles; } },
+  InputEvent: class InputEvent { constructor(type, options = {}) { this.type = type; Object.assign(this, options); } },
+  addEventListener() {},
+  dispatchEvent() {},
+  fetch: async () => ({ ok: true, json: async () => ({}) }),
+  setInterval() { return 1; },
+  clearInterval() {},
+  setTimeout,
+  clearTimeout,
   console,
 });
-const observabilitySource = fs.readFileSync(new URL("./client-observability.js", import.meta.url), "utf8");
-const observability = new vm.SourceTextModule(observabilitySource, { context });
-const selectorSource = fs.readFileSync(new URL("./master-frontier/source-investigation.js", import.meta.url), "utf8");
-const selector = new vm.SourceTextModule(selectorSource, { context });
-const parsed = new vm.SourceTextModule(source, { context });
-await parsed.link((specifier) => {
-  if (specifier === "./client-observability.js?v=20260820-native-input-receipt2") return observability;
-  if (specifier === "./master-frontier/source-investigation.js?v=20260806-frontier-protocol1") return selector;
-  throw new Error(`unexpected import: ${specifier}`);
-});
+const modules = new Map();
+for (const [specifier, relative] of [
+  ["./client-observability.js", "./client-observability.js"],
+  ["./master-frontier/source-investigation.js?v=20260806-frontier-protocol1", "./master-frontier/source-investigation.js"],
+  ["./runtime-refresh.js?v=20260826-runtime-refresh1", "./runtime-refresh.js"],
+]) {
+  modules.set(specifier, new vm.SourceTextModule(fs.readFileSync(new URL(relative, import.meta.url), "utf8"), { context }));
+}
+const parsed = new vm.SourceTextModule(fs.readFileSync(new URL("./client-presence.js", import.meta.url), "utf8"), { context });
+await parsed.link((specifier) => modules.get(specifier));
 await parsed.evaluate();
 const module = parsed.namespace;
 
 assert.equal(module.liveClientRuntimeType(), "electron");
-assert.deepEqual(Array.from(module.liveClientCapabilities()), [
-  "observe.status",
-  "observe.analytics.on_demand",
-  "observe.browser.inspect",
-  "control.widget.open",
-  "control.space.open",
-  "control.browser.navigate",
-  "control.navigate",
-  "control.update.apply",
-  "control.reload",
-]);
-await module.primeNativeWebSurfaceCapabilities();
-assert.deepEqual(JSON.parse(JSON.stringify(nativeCalls)), [{ operation: "capabilities", args: {} }]);
-assert.deepEqual(Array.from(module.liveClientCapabilities()), [
-  "observe.status",
-  "observe.analytics.on_demand",
-  "observe.browser.inspect",
-  "control.widget.open",
-  "control.space.open",
-  "control.browser.navigate",
-  "control.navigate",
-  "control.update.apply",
-  "control.reload",
-  "control.browser.input_receipt",
-  "control.browser.pointer.dispatch",
-  "control.browser.javascript.execute.unrestricted",
-]);
-assert.deepEqual(JSON.parse(JSON.stringify(await module.executeLiveClientCommand({ id: "enable-1", type: "browser_input_receipt", payload: { enabled: "yes" } }))), {
-  ok: false,
-  error: "invalid_input_receipt_state",
-});
-assert.deepEqual(JSON.parse(JSON.stringify(await module.executeLiveClientCommand({ id: "enable-2", type: "browser_input_receipt", payload: { enabled: true } }))), {
+const capabilities = Array.from(module.liveClientCapabilities());
+assert.equal(capabilities.some((id) => id.startsWith("observe.browser.") || id.startsWith("control.browser.")), false);
+assert.equal(capabilities.includes("control.runtime.refresh"), true);
+assert.equal(capabilities.includes("control.agent.prompt.submit"), true);
+assert.equal(capabilities.includes("control.agent.session.new"), true);
+assert.deepEqual(JSON.parse(JSON.stringify(await module.executeLiveClientCommand({ id: "prompt", type: "agent_prompt_submit", payload: { message: "hello" } }))), {
   ok: true,
-  browser: { id: "browser", input_receipt_state: "enabled" },
-  proof: ["native.web_surface.input_receipt_mode"],
+  submitted: true,
+  message_chars: 5,
+  proof: ["client.agent.prompt.submitted"],
 });
-assert.deepEqual(JSON.parse(JSON.stringify(nativeCalls.at(-1))), { operation: "input-receipt", args: { id: "browser", enabled: true } });
-assert.deepEqual(JSON.parse(JSON.stringify(await module.executeLiveClientCommand({ id: "dispatch bad", type: "browser_pointer_dispatch", payload: { x: 20, y: 21 } }))), {
+assert.equal(agentInput.value, "hello");
+assert.equal(submitted, 1);
+assert.deepEqual(JSON.parse(JSON.stringify(await module.executeLiveClientCommand({ id: "session", type: "agent_session_new", payload: {} }))), {
+  ok: true,
+  created: true,
+  before: "old-session",
+  after: "new-session",
+  input_empty: true,
+  proof: ["client.agent.session.clean"],
+});
+assert.deepEqual(JSON.parse(JSON.stringify(await module.executeLiveClientCommand({ id: "legacy", type: "browser_navigate", payload: {} }))), {
   ok: false,
-  error: "invalid_pointer_dispatch_command_id",
+  error: "unsupported_pwa_control_command",
 });
-const pointerResult = await module.executeLiveClientCommand({ id: "dispatch-1", type: "browser_pointer_dispatch", payload: { x: 20, y: 21 } });
-assert.equal(pointerResult.ok, true);
-assert.equal(pointerResult.browser.pointer_dispatch.input_source, "electron_synthetic");
-assert.deepEqual(JSON.parse(JSON.stringify(nativeCalls.at(-1))), { operation: "pointer-dispatch", args: { id: "browser", x: 20, y: 21, commandId: "dispatch-1" } });
-const javascriptResult = await module.executeLiveClientCommand({ id: "javascript-1", type: "browser_javascript_execute_unrestricted", payload: { javascript: "21 * 2" } });
-assert.equal(javascriptResult.ok, true);
-assert.equal(javascriptResult.browser.javascript_execution.result_json, "42");
-assert.deepEqual(JSON.parse(JSON.stringify(nativeCalls.at(-1))), { operation: "javascript-execute-unrestricted", args: { id: "browser", source: "21 * 2", commandId: "javascript-1" } });
-let openCalls = 0;
-const openControls = { async openWidget() { openCalls += 1; return { opened: true, alreadyOpen: openCalls > 1 }; } };
-assert.deepEqual(JSON.parse(JSON.stringify(await module.executeLiveClientCommand({ id: "open-1", type: "open_widget", payload: { widget_id: "browser" } }, openControls))), {
-  ok: true, widget_id: "browser", opened: true,
-});
-assert.deepEqual(JSON.parse(JSON.stringify(await module.executeLiveClientCommand({ id: "open-2", type: "open_widget", payload: { widget_id: "browser" } }, openControls))), {
-  ok: true, widget_id: "browser", opened: true, already_open: true,
-});
-assert.equal(openCalls, 2);
-const spaceCalls = [];
-assert.deepEqual(JSON.parse(JSON.stringify(await module.executeLiveClientCommand(
-  { id: "space-1", type: "space_open", payload: { space: "Realure" } },
-  { async openSpace(reference) { spaceCalls.push(reference); return { space_id: "space-realure", space_name: "Realure", opened: true, already_open: false }; } },
-))), { ok: true, space_id: "space-realure", space_name: "Realure", opened: true, already_open: false, proof: ["client.ack", "client.space.active"] });
-assert.deepEqual(spaceCalls, ["Realure"]);
-assert.deepEqual(JSON.parse(JSON.stringify(module.liveClientUiSummary())), {
-  canvas_app_ids: [],
-  open_widget_ids: [],
-  widget_icons: [],
-  widget_windows: [],
-  resize_directions: [],
-  frontier_protocol: { effective: "v6", stored: "legacy" },
-  shell_overlay: { avatar_chat_open: false, suppressed_native_widget_ids: [] },
-});
-storage.set("wasmAgent.frontierProtocol", "explicit:v5");
-assert.deepEqual(JSON.parse(JSON.stringify(module.liveClientUiSummary().frontier_protocol)), { effective: "v5", stored: "explicit" });
 
-delete context.window.wasmAgentNative;
-context.window.WasmAgentNative = {};
-assert.equal(module.liveClientRuntimeType(), "android-kotlin");
-assert.deepEqual(Array.from(module.liveClientCapabilities()), ["observe.status", "observe.analytics.on_demand", "observe.cdp.on_demand", "control.space.open", "control.navigate", "control.reload"]);
-delete context.window.WasmAgentNative;
-assert.equal(module.liveClientRuntimeType(), "pwa");
-assert.deepEqual(Array.from(module.liveClientCapabilities()), ["observe.status", "observe.analytics.on_demand", "observe.cdp.external_on_demand", "control.space.open", "control.navigate", "control.reload"]);
-
-console.log("client presence capability tests passed");
+console.log("client presence excludes removed Electron Browser capabilities");

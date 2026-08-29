@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prove one admin-authorized V6 Browser-widget action in the installed Electron app."""
+"""Prove production V6 respects the installed Electron client's active widget surface."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ from master_frontier import event_anchor_store  # noqa: E402
 
 
 REPORT = ROOT / "reports/context/latest/master-frontier-v6-client-ui.json"
-OBJECTIVE = "Open the Browser widget on the live Electron client and report only after the client acknowledges it."
+OBJECTIVE = "open browser widget"
 
 
 def env_value(path: Path, name: str) -> str:
@@ -70,17 +70,6 @@ def live_electron_clients(state: Path) -> list[dict[str, Any]]:
     ]
 
 
-def command_artifact(state: Path, command_id: str) -> tuple[Path | None, dict[str, Any]]:
-    matches = list((state / "native-control/commands").glob(f"*/{command_id}.json"))
-    if len(matches) != 1:
-        return None, {}
-    try:
-        payload = json.loads(matches[0].read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return matches[0], {}
-    return matches[0], payload if isinstance(payload, dict) else {}
-
-
 def main() -> int:
     started_monotonic = time.monotonic()
     parser = argparse.ArgumentParser(description=__doc__)
@@ -90,12 +79,30 @@ def main() -> int:
     state = args.cloud_root / "state"
     clients_before = live_electron_clients(state)
     report: dict[str, Any] = {
-        "schema": "MF6_CLIENT_UI_PRODUCTION/1", "ok": False, "origin": args.origin,
+        "schema": "MF6_CLIENT_UI_PRODUCTION/2", "ok": False, "origin": args.origin,
         "objectiveSha256": hashlib.sha256(OBJECTIVE.encode()).hexdigest(),
         "liveElectronBefore": len(clients_before), "userRole": "admin",
     }
     if not clients_before:
         report["error"] = {"code": "live_electron_client_missing"}
+        report["durationMs"] = round((time.monotonic() - started_monotonic) * 1000)
+        REPORT.parent.mkdir(parents=True, exist_ok=True)
+        REPORT.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+        print(json.dumps(report, separators=(",", ":")))
+        return 1
+    target = next((
+        item for item in clients_before
+        if item.get("widget_manifest") == live_clients.ACTIVE_SURFACE_MANIFEST
+        and item.get("space_id") == "home"
+        and "browser" not in set(item.get("widget_ids") or [])
+    ), None)
+    if target is None:
+        report["error"] = {"code": "space_home_surface_fixture_missing"}
+        report["clients"] = [{
+            "clientId": str(item.get("client_id") or ""), "spaceId": str(item.get("space_id") or ""),
+            "widgetManifest": str(item.get("widget_manifest") or ""),
+            "widgetIds": list(item.get("widget_ids") or []),
+        } for item in clients_before[:4]]
         report["durationMs"] = round((time.monotonic() - started_monotonic) * 1000)
         REPORT.parent.mkdir(parents=True, exist_ok=True)
         REPORT.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
@@ -118,11 +125,11 @@ def main() -> int:
     nonce = uuid.uuid4().hex[:16]
     body = {
         "protocol": "v6", "session_id": f"v6-client-ui-{nonce}", "turn_id": f"turn-{nonce}",
-        "instructions": "Use only the declared client inspect/open-widget operations. Open widget id browser; do not navigate, reload, edit files, or claim success without the acknowledged receipt.",
+        "instructions": "Use only the declared client widget operation. Respect the active-surface widget manifest. Do not change spaces, navigate, reload, edit files, or claim the widget opened when it is unavailable.",
         "max_output_tokens": 800,
         "envelope": {
             "schema": "hermes.wasm_agent.master_frontier.v6", "trace_id": nonce,
-            "objective": OBJECTIVE, "objective_kind": "model_decision", "surface": "avatar-chat",
+            "objective": OBJECTIVE, "objective_kind": "client_action", "surface": "avatar-chat",
             "route_id": "wasm-agent.avatar-chat.ui",
             "compact_state": {"surface": "production-installed-client-proof", "route_id": "wasm-agent.avatar-chat.ui"},
             "capabilities": ["client.ui.inspect", "client.ui.control"],
@@ -153,16 +160,19 @@ def main() -> int:
         for proof in (item.get("proof") or [])
         if str(proof).startswith("cmd-")
     ]
-    command_path, command = command_artifact(state, command_ids[0]) if len(command_ids) == 1 else (None, {})
-    command_result = command.get("result") if isinstance(command.get("result"), dict) else {}
-    acknowledged = bool(
-        len(widget_tools) == 1 and widget_tools[0].get("ok") is True
-        and widget_tools[0].get("status") == "acknowledged"
+    widget_rejected = bool(len(widget_tools) == 1 and widget_tools[0].get("ok") is False)
+    no_native_command = command_ids == []
+    state_value = provider.get("state") if isinstance(provider.get("state"), dict) else {}
+    goals = state_value.get("goals") if isinstance(state_value.get("goals"), list) else []
+    blocked_goal = bool(
+        state_value.get("status") == "blocked" and len(goals) == 1
+        and isinstance(goals[0], dict) and goals[0].get("status") == "blocked"
     )
-    command_verified = bool(
-        command_path and command.get("status") == "finished" and command.get("type") == "open_widget"
-        and (command.get("payload") or {}).get("widget_id") == "browser"
-        and command_result.get("ok") is True
+    reply = " ".join(str(result.get("reply") or "").lower().split())
+    explicit_unavailable = bool(
+        "browser" in reply and "space-home" in reply
+        and ("not available" in reply or "unavailable" in reply)
+        and "no success was verified" in reply
     )
     integrity = provider.get("integrity_proof") if isinstance(provider.get("integrity_proof"), dict) else {}
     anchor = integrity.get("anchor") if isinstance(integrity.get("anchor"), dict) else {}
@@ -170,8 +180,6 @@ def main() -> int:
     chain = event_anchor_store.EventAnchorStore(event_anchor_store.default_path(state)).verify_chain(
         user_id=str(row[0]), run_id=run_id,
     ) if run_id else {}
-    target_id = str(command.get("device_id") or "")
-    target = next((item for item in live_electron_clients(state) if item.get("client_id") == target_id), {})
     with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True) as connection:
         commentary_rows = connection.execute(
             "SELECT payload_json FROM agent_run_event_tb "
@@ -203,20 +211,24 @@ def main() -> int:
         "tokenUsage": diagnostics.get("token_usage_total") if isinstance(diagnostics.get("token_usage_total"), dict) else None,
         "performance": diagnostics.get("performance") if isinstance(diagnostics.get("performance"), dict) else None,
         "durationMs": round((time.monotonic() - started_monotonic) * 1000),
-        "completionGatePassed": diagnostics.get("completion_gaps") == [],
-        "clientWidgetAcknowledged": acknowledged,
-        "clientCommandArtifactVerified": command_verified,
+        "terminalUnavailableGatePassed": widget_rejected and no_native_command and blocked_goal and explicit_unavailable,
+        "clientWidgetRejected": widget_rejected,
+        "nativeCommandNotQueued": no_native_command,
+        "blockedGoalVerified": blocked_goal,
+        "explicitUnavailableReplyVerified": explicit_unavailable,
+        "completionGaps": diagnostics.get("completion_gaps") if isinstance(diagnostics.get("completion_gaps"), list) else [],
         "modelAuthoredCommentaryVerified": commentary_verified,
         "modelCommentaryCount": len(commentary_updates),
         "modelCommentarySha256": [
             hashlib.sha256(str(update.get("message") or "").encode()).hexdigest()
             for update in commentary_updates
         ],
-        "commandIdSha256": hashlib.sha256(command_ids[0].encode()).hexdigest() if len(command_ids) == 1 else "",
         "installedClient": {
             "runtimeType": target.get("runtime_type") or "", "buildId": target.get("build_id") or "",
             "appVersion": target.get("app_version") or "", "route": target.get("route") or "",
-            "live": target.get("live") is True,
+            "live": target.get("live") is True, "spaceId": target.get("space_id") or "",
+            "spaceName": target.get("space_name") or "", "widgetManifest": target.get("widget_manifest") or "",
+            "widgetIds": target.get("widget_ids") if isinstance(target.get("widget_ids"), list) else [],
         },
         "changedFiles": provider.get("changed_files") if isinstance(provider.get("changed_files"), list) else [],
         "integrityProof": {
@@ -231,11 +243,14 @@ def main() -> int:
     report["ok"] = bool(
         report["authenticatedAdmin"] and status == 200 and run_id
         and report["protocol"] == "v6" and report["nonemptyReply"]
-        and report["exactUsageMeasured"] and report["completionGatePassed"]
-        and acknowledged and command_verified and commentary_verified and report["changedFiles"] == []
+        and report["exactUsageMeasured"] and report["terminalUnavailableGatePassed"]
+        and commentary_verified and report["changedFiles"] == []
         and report["installedClient"]["runtimeType"] == "electron"
         and str(report["installedClient"]["route"]).startswith("https://wa.colmeio.com/")
         and report["installedClient"]["live"]
+        and report["installedClient"]["spaceId"] == "home"
+        and report["installedClient"]["widgetManifest"] == live_clients.ACTIVE_SURFACE_MANIFEST
+        and "browser" not in report["installedClient"]["widgetIds"]
         and report["integrityProof"]["status"] == "verified"
         and report["integrityProof"]["terminal"]
         and report["anchorChain"]["ok"] and report["anchorChain"]["final"]

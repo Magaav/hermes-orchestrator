@@ -1,33 +1,14 @@
-import { executeClientObservability } from "./client-observability.js?v=20260820-native-input-receipt2";
+import { executeClientObservability } from "./client-observability.js";
 import { masterFrontierExplicitProtocol } from "./master-frontier/source-investigation.js?v=20260806-frontier-protocol1";
+import { prepareRuntimeRefresh } from "./runtime-refresh.js?v=20260826-runtime-refresh1";
 
 const CLIENT_ID_KEY = "wasmAgent.liveClientId.v1";
 const ELECTRON_ACTIVE_POLL_MS = 2000;
 const ELECTRON_BACKGROUND_POLL_MS = 10000;
 const WEB_ACTIVE_POLL_MS = 15000;
-let nativeWebSurfaceCapabilities = null;
-let nativeWebSurfaceCapabilityPromise = null;
-
-async function primeNativeWebSurfaceCapabilities() {
-  if (nativeWebSurfaceCapabilityPromise) return nativeWebSurfaceCapabilityPromise;
-  if (runtimeType() !== "electron" || typeof window.wasmAgentNative?.webSurfaces?.invoke !== "function") {
-    nativeWebSurfaceCapabilities = new Set();
-    return [];
-  }
-  nativeWebSurfaceCapabilityPromise = window.wasmAgentNative.webSurfaces.invoke("capabilities", {})
-    .then((manifest) => {
-      nativeWebSurfaceCapabilities = new Set(Array.isArray(manifest?.capabilities) ? manifest.capabilities : []);
-      return [...nativeWebSurfaceCapabilities];
-    })
-    .catch(() => {
-      nativeWebSurfaceCapabilities = new Set();
-      return [];
-    });
-  return nativeWebSurfaceCapabilityPromise;
-}
-
-function hasNativeWebSurfaceCapability(value) {
-  return nativeWebSurfaceCapabilities?.has(value) === true;
+const ACTIVE_SURFACE_MANIFEST = "active-surface-v1";
+function automaticWindowsUpdatePayload(payload = {}) {
+  return { ...payload, automatic: true, applyApproved: true };
 }
 
 function pollDelay(runtime = runtimeType(), hidden = document.hidden) {
@@ -55,16 +36,40 @@ function runtimeType() {
 
 function capabilities() {
   if (runtimeType() === "electron") {
-    const values = ["observe.status", "observe.analytics.on_demand", "observe.browser.inspect", "control.widget.open", "control.space.open", "control.browser.navigate", "control.navigate", "control.update.apply", "control.reload"];
-    if (hasNativeWebSurfaceCapability("web_surface.input_receipt")) values.push("control.browser.input_receipt");
-    if (hasNativeWebSurfaceCapability("web_surface.pointer.dispatch")) values.push("control.browser.pointer.dispatch");
-    if (hasNativeWebSurfaceCapability("web_surface.javascript.execute.unrestricted")) values.push("control.browser.javascript.execute.unrestricted");
-    return values;
+    return ["observe.status", "observe.analytics.on_demand", "observe.runtime.diagnose", "observe.spaces.catalog", "control.widget.open", "control.space.open", "control.agent.session.new", "control.agent.prompt.submit", "control.navigate", "control.update.apply", "control.runtime.refresh", "control.reload"];
   }
   if (runtimeType() === "android-kotlin") {
-    return ["observe.status", "observe.analytics.on_demand", "observe.cdp.on_demand", "control.space.open", "control.navigate", "control.reload"];
+    return ["observe.status", "observe.analytics.on_demand", "observe.spaces.catalog", "observe.cdp.on_demand", "control.space.open", "control.navigate", "control.reload"];
   }
-  return ["observe.status", "observe.analytics.on_demand", "observe.cdp.external_on_demand", "control.space.open", "control.navigate", "control.reload"];
+  return ["observe.status", "observe.analytics.on_demand", "observe.spaces.catalog", "observe.cdp.external_on_demand", "control.space.open", "control.navigate", "control.reload"];
+}
+
+function submitAgentPrompt(payload = {}, documentRef = globalThis.document) {
+  const message = String(payload.message || "").trim();
+  if (!message || message.length > 4096) return { ok: false, error: "agent_prompt_invalid" };
+  const input = documentRef?.querySelector?.("#agentInput");
+  const form = documentRef?.querySelector?.("#agentForm");
+  if (!input || !form?.requestSubmit) return { ok: false, error: "agent_prompt_surface_unavailable" };
+  const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(input), "value")?.set;
+  if (setter) setter.call(input, message);
+  else input.value = message;
+  input.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: message }));
+  input.dispatchEvent(new Event("change", { bubbles: true }));
+  if (String(input.value || "") !== message) return { ok: false, error: "agent_prompt_value_unverified" };
+  form.requestSubmit();
+  return { ok: true, submitted: true, message_chars: message.length, proof: ["client.agent.prompt.submitted"] };
+}
+
+function newAgentSession(documentRef = globalThis.document) {
+  const button = documentRef?.querySelector?.("#agentNewSessionButton");
+  const input = documentRef?.querySelector?.("#agentInput");
+  if (!button?.click || !input) return { ok: false, error: "agent_session_surface_unavailable" };
+  const before = String(documentRef?.querySelector?.("#agentOverlay")?.dataset?.sessionId || "");
+  button.click();
+  const after = String(documentRef?.querySelector?.("#agentOverlay")?.dataset?.sessionId || "");
+  const inputEmpty = String(input.value || "") === "";
+  if (!inputEmpty) return { ok: false, error: "agent_session_new_postcondition_unverified", before, after, input_empty: false };
+  return { ok: true, created: true, before, after, input_empty: true, proof: ["client.agent.session.clean"] };
 }
 
 function uiSummary() {
@@ -93,6 +98,33 @@ function uiSummary() {
   };
 }
 
+function activeWidgetIds(summary = uiSummary()) {
+  return Array.from(new Set((summary?.canvas_app_ids || [])
+    .map((value) => String(value || "").trim().slice(0, 80))
+    .filter(Boolean))).slice(0, 32);
+}
+
+function activeSurface(controls = {}, summary = uiSummary()) {
+  const space = typeof controls.getActiveSpace === "function" ? controls.getActiveSpace() || {} : {};
+  return {
+    manifest: ACTIVE_SURFACE_MANIFEST,
+    space_id: String(space.id || space.storage_id || "").slice(0, 120),
+    space_name: String(space.display_name || space.name || "").slice(0, 160),
+    widget_ids: activeWidgetIds(summary),
+  };
+}
+
+function unavailableWidget(widgetId, controls = {}, summary = uiSummary()) {
+  const surface = activeSurface(controls, summary);
+  if (surface.widget_ids.includes(widgetId)) return null;
+  return {
+    ok: false,
+    error: "widget_unavailable_on_active_surface",
+    widget_id: widgetId,
+    surface,
+  };
+}
+
 async function postResult(command, result) {
   await fetch("/native/control/result", {
     method: "POST",
@@ -104,73 +136,56 @@ async function postResult(command, result) {
 async function executeClientCommand(command, controls = {}) {
   const type = String(command?.type || "");
   const payload = command?.payload || {};
-  if (type.startsWith("observability_")) return executeClientObservability(type, payload);
+  if (type.startsWith("observability_") || type === "runtime_diagnose") return executeClientObservability(type, payload);
   if (type === "status") return { ok: true, runtime_type: runtimeType(), route: location.href, title: document.title, visibility: document.visibilityState, ui: uiSummary() };
+  if (type === "space_catalog") {
+    if (typeof controls.getSpaceCatalog !== "function") return { ok: false, error: "space_catalog_unavailable" };
+    const catalog = controls.getSpaceCatalog();
+    if (catalog?.manifest !== "space-catalog-v1" || !Array.isArray(catalog.spaces)) return { ok: false, error: "space_catalog_invalid" };
+    return { ok: true, ...catalog, proof: ["client.space.catalog"] };
+  }
   if (type === "open_widget") {
     if (typeof controls.openWidget !== "function") return { ok: false, error: "widget_control_unavailable" };
     const widgetId = String(payload.widget_id || payload.widgetId || "").trim();
     if (!widgetId) return { ok: false, error: "invalid_widget_id" };
+    const unavailable = unavailableWidget(widgetId, controls);
+    if (unavailable) return unavailable;
     const opened = await controls.openWidget(widgetId);
-    return { ok: true, widget_id: widgetId, opened: true, ...(opened?.alreadyOpen === true ? { already_open: true } : {}) };
+    const summary = uiSummary();
+    const surface = activeSurface(controls, summary);
+    const visible = surface.widget_ids.includes(widgetId) && summary?.open_widget_ids?.includes(widgetId);
+    if (opened?.opened !== true || !visible) {
+      return { ok: false, error: "widget_open_postcondition_unverified", widget_id: widgetId, opened: opened?.opened === true, visible, surface };
+    }
+    return {
+      ok: true, widget_id: widgetId, opened: true, visible: true, surface,
+      proof: ["client.widget.visible"],
+      ...(opened.alreadyOpen === true ? { already_open: true } : {}),
+    };
   }
   if (type === "space_open") {
     if (typeof controls.openSpace !== "function") return { ok: false, error: "space_control_unavailable" };
     const reference = String(payload.space || payload.space_id || payload.space_name || "").trim();
     if (!reference) return { ok: false, error: "space_reference_missing" };
-    return { ok: true, ...await controls.openSpace(reference), proof: ["client.ack", "client.space.active"] };
+    return { ok: true, ...await controls.openSpace(reference), surface: activeSurface(controls), proof: ["client.ack", "client.space.active"] };
   }
-  if (type === "browser_navigate") {
-    if (runtimeType() !== "electron" || !window.wasmAgentNative?.webSurfaces?.invoke) return { ok: false, error: "native_browser_unavailable" };
-    const url = new URL(String(payload.url || ""));
-    if (url.protocol !== "https:") return { ok: false, error: "navigation_protocol_denied" };
-    const surface = await window.wasmAgentNative.webSurfaces.invoke("navigate", { id: "browser", url: url.href });
-    return { ok: true, url: url.href, surface };
+  if (type === "agent_prompt_submit") {
+    if (runtimeType() !== "electron") return { ok: false, error: "agent_prompt_control_unavailable" };
+    return submitAgentPrompt(payload);
   }
-  if (type === "browser_input_receipt") {
-    if (runtimeType() !== "electron" || !window.wasmAgentNative?.webSurfaces?.invoke) return { ok: false, error: "native_browser_unavailable" };
-    if (!hasNativeWebSurfaceCapability("web_surface.input_receipt")) return { ok: false, error: "input_receipt_unsupported" };
-    if (typeof payload.enabled !== "boolean") return { ok: false, error: "invalid_input_receipt_state" };
-    const surface = await window.wasmAgentNative.webSurfaces.invoke("input-receipt", { id: "browser", enabled: payload.enabled });
-    const acknowledged = surface?.inputReceiptEnabled === payload.enabled;
-    return {
-      ok: acknowledged,
-      browser: { id: "browser", input_receipt_state: payload.enabled ? "enabled" : "disabled" },
-      proof: acknowledged ? ["native.web_surface.input_receipt_mode"] : [],
-    };
-  }
-  if (type === "browser_pointer_dispatch") {
-    if (runtimeType() !== "electron" || !window.wasmAgentNative?.webSurfaces?.invoke) return { ok: false, error: "native_browser_unavailable" };
-    if (!hasNativeWebSurfaceCapability("web_surface.pointer.dispatch")) return { ok: false, error: "pointer_dispatch_unsupported" };
-    const x = Number(payload.x);
-    const y = Number(payload.y);
-    const commandId = String(command?.id || "").trim();
-    if (!Number.isSafeInteger(x) || !Number.isSafeInteger(y) || x < 0 || y < 0) return { ok: false, error: "invalid_pointer_dispatch_position" };
-    if (!commandId || commandId.length > 80 || !/^[a-zA-Z0-9._-]+$/.test(commandId)) return { ok: false, error: "invalid_pointer_dispatch_command_id" };
-    const dispatch = await window.wasmAgentNative.webSurfaces.invoke("pointer-dispatch", { id: "browser", x, y, commandId });
-    return {
-      ok: dispatch?.ok === true && dispatch?.dispatch_accepted === true,
-      browser: { id: "browser", pointer_dispatch: dispatch },
-      proof: dispatch?.dispatch_accepted === true ? ["native.web_surface.pointer.dispatch.accepted"] : [],
-    };
-  }
-  if (type === "browser_javascript_execute_unrestricted") {
-    if (runtimeType() !== "electron" || !window.wasmAgentNative?.webSurfaces?.invoke) return { ok: false, error: "native_browser_unavailable" };
-    if (!hasNativeWebSurfaceCapability("web_surface.javascript.execute.unrestricted")) return { ok: false, error: "browser_javascript_execution_unsupported" };
-    const source = String(payload.javascript ?? payload.source ?? "");
-    const commandId = String(command?.id || "").trim();
-    if (!source.trim()) return { ok: false, error: "javascript_source_missing" };
-    if (!commandId || commandId.length > 80 || !/^[a-zA-Z0-9._-]+$/.test(commandId)) return { ok: false, error: "invalid_javascript_command_id" };
-    const execution = await window.wasmAgentNative.webSurfaces.invoke("javascript-execute-unrestricted", { id: "browser", source, commandId });
-    return {
-      ok: execution?.ok === true,
-      browser: { id: "browser", javascript_execution: execution },
-      proof: execution?.ok === true ? ["native.web_surface.javascript.execute.unrestricted"] : [],
-    };
+  if (type === "agent_session_new") {
+    if (runtimeType() !== "electron") return { ok: false, error: "agent_session_control_unavailable" };
+    return newAgentSession();
   }
   if (type === "apply_windows_update") {
     if (runtimeType() !== "electron" || typeof controls.applyWindowsUpdate !== "function") return { ok: false, error: "windows_update_control_unavailable" };
-    return controls.applyWindowsUpdate(payload);
+    const result = await controls.applyWindowsUpdate(automaticWindowsUpdatePayload(payload));
+    return {
+      ...(result && typeof result === "object" ? result : { ok: false, error: "windows_update_result_invalid" }),
+      updatePolicy: { mode: "automatic", approval: "preapproved" },
+    };
   }
+  if (type === "runtime_refresh") return prepareRuntimeRefresh();
   if (type === "reload" || type === "hard_reload" || type === "reload_ignore_cache") {
     setTimeout(() => location.reload(), 50);
     return { ok: true, reloading: true };
@@ -185,7 +200,7 @@ async function executeClientCommand(command, controls = {}) {
 }
 
 async function poll(controls = {}) {
-  const activeSpace = typeof controls.getActiveSpace === "function" ? controls.getActiveSpace() || {} : {};
+  const surface = activeSurface(controls);
   const query = new URLSearchParams({
     device_id: clientId(),
     runtime_type: runtimeType(),
@@ -193,8 +208,10 @@ async function poll(controls = {}) {
     route: location.href,
     title: document.title,
     visibility: document.visibilityState,
-    space_id: String(activeSpace.id || activeSpace.storage_id || ""),
-    space_name: String(activeSpace.display_name || activeSpace.name || ""),
+    space_id: surface.space_id,
+    space_name: surface.space_name,
+    widget_manifest: surface.manifest,
+    widget_ids: surface.widget_ids.join(","),
     capabilities: capabilities().join(","),
   });
   const response = await fetch(`/native/control/poll?${query}`, { headers: { Accept: "application/json" } });
@@ -219,8 +236,7 @@ export function startClientPresence(controls = {}) {
     clearTimeout(timer);
     timer = setTimeout(() => { void run().finally(schedule); }, pollDelay());
   };
-  const primed = runtimeType() === "electron" ? primeNativeWebSurfaceCapabilities() : Promise.resolve([]);
-  void primed.finally(() => run().finally(schedule));
+  void run().finally(schedule);
   document.addEventListener("visibilitychange", () => {
     clearTimeout(timer);
     if (document.hidden) schedule();
@@ -230,11 +246,14 @@ export function startClientPresence(controls = {}) {
 }
 
 export {
+  automaticWindowsUpdatePayload,
   capabilities as liveClientCapabilities,
   clientId as liveClientId,
   executeClientCommand as executeLiveClientCommand,
   pollDelay as clientPresencePollDelay,
-  primeNativeWebSurfaceCapabilities,
   runtimeType as liveClientRuntimeType,
+  submitAgentPrompt as liveClientSubmitAgentPrompt,
+  newAgentSession as liveClientNewAgentSession,
+  activeWidgetIds as liveClientActiveWidgetIds,
   uiSummary as liveClientUiSummary,
 };

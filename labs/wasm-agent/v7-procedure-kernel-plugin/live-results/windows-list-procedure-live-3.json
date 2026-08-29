@@ -1,0 +1,53 @@
+{
+  "capability_ok": true,
+  "capability_used": true,
+  "changed_files": [],
+  "duration_ms": 8440,
+  "expected_capability": "client.windows.desktop.windows.list",
+  "expected_proof": "windows.desktop.top_level_windows",
+  "fixture": "windows-list",
+  "label": "procedure-live-3",
+  "ok": true,
+  "performance": {
+    "checkpoint": {
+      "count": 1,
+      "duration_ms": 10
+    },
+    "phases": {
+      "host_after_last_provider_ms": 0,
+      "host_before_first_provider_ms": 8353,
+      "host_between_providers_ms": 0,
+      "ingress_to_v6_ms": 0,
+      "provider_ms": 0
+    },
+    "projection": {
+      "body_bytes": 0,
+      "calls": 0,
+      "message_content_bytes": 0,
+      "messages_bytes": 0,
+      "tools_bytes": 0
+    },
+    "provider_calls": [],
+    "schema": "master.frontier.v6.performance.v1",
+    "total_ms": 8353,
+    "v6_internal_ms": 8353
+  },
+  "procedure_memory": {
+    "capability": "client.windows.desktop.windows.list",
+    "objective_sha256": "7eb7b41e6dabe314122fe753558ae7f235fe1448e0220fe28e320e5b3ee6ca6c",
+    "state": "replayed"
+  },
+  "proof_verified": true,
+  "provider_calls": 0,
+  "reply": "12 visible top-level Windows windows: WASM Agent (WASM Agent); colmeio-logo-raw-mask-degrade.svg - colmeio [WSL: Ubuntu] - Visual Studio Code (Code); logo.png - local [SSH: openclaw.ohana] - Visual Studio Code (Code); deck-of-cards/deck-of-cards: Deck of Cards (old version) - Google Chrome (chrome); localhost - Google Chrome (chrome); WhatsApp Web (chrome); WASM Agent (WindowsTerminal); Agent Browser Tunnel (WindowsTerminal); Administrator: Agent Browser for WSL (cmd); Back (TextInputHost); about:blank - Google Chrome (chrome); Program Manager (explorer)",
+  "run_id": "wa_run_7e7aae0a2b7e4e31bfab08e41b8f18d5",
+  "schema": "mf-v7.pilot.live-fixture.v1",
+  "session_id": "mf6-procedure-live-3",
+  "token_usage": {
+    "calls": 0,
+    "exact": true,
+    "metered_calls": 0,
+    "total_tokens": 0
+  },
+  "user_id_hash": "9633b2c7acf90741"
+}

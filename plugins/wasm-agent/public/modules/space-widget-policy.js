@@ -53,6 +53,45 @@ export function initialVisibleWidgetPosition({ visibleRect, boardRect, widgetRec
   };
 }
 
+export function appRect(left, top, width, height) {
+  return { left, top, right: left + width, bottom: top + height };
+}
+
+function appRectsOverlap(a, b, tolerance) {
+  const gap = 0;
+  return a.left < b.right + gap - tolerance
+    && a.right + gap > b.left + tolerance
+    && a.top < b.bottom + gap - tolerance
+    && a.bottom + gap > b.top + tolerance;
+}
+
+export function nearestOpenAppPosition(desiredLeft, desiredTop, width, height, maxLeft, maxTop, occupied = [], { grid = 5, inset = 0, collisionTolerance = Math.ceil(grid / 2) } = {}) {
+  const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
+  const snap = (value) => Math.round((Number(value) || 0) / grid) * grid;
+  const fits = (left, top) => !occupied.some((item) => appRectsOverlap(appRect(left, top, width, height), item, collisionTolerance));
+  const startLeft = clamp(Math.round(Number(desiredLeft || 0)), inset, maxLeft);
+  const startTop = clamp(Math.round(Number(desiredTop || 0)), inset, maxTop);
+  if (fits(startLeft, startTop)) return { left: startLeft, top: startTop };
+  const maxRadius = Math.max(maxLeft, maxTop) + width + height;
+  for (let radius = grid; radius <= maxRadius; radius += grid) {
+    for (let dx = -radius; dx <= radius; dx += grid) {
+      for (const dy of [-radius, radius]) {
+        const left = clamp(snap(startLeft + dx), inset, maxLeft);
+        const top = clamp(snap(startTop + dy), inset, maxTop);
+        if (fits(left, top)) return { left, top };
+      }
+    }
+    for (let dy = -radius + grid; dy <= radius - grid; dy += grid) {
+      for (const dx of [-radius, radius]) {
+        const left = clamp(snap(startLeft + dx), inset, maxLeft);
+        const top = clamp(snap(startTop + dy), inset, maxTop);
+        if (fits(left, top)) return { left, top };
+      }
+    }
+  }
+  return { left: startLeft, top: startTop };
+}
+
 export function organizedSpaceAppPositions({ count = 0, boardWidth = 0, boardHeight = 0, visibleWidth = 0, visibleHeight = 0, scrollLeft = 0, scrollTop = 0, topInset = 0, buttonWidth = 62, buttonHeight = 70, grid = 5 } = {}) {
   const total = Math.max(0, Math.floor(Number(count) || 0));
   if (!total) return { positions: [], columns: 0, rows: 0, overflowRows: 0 };

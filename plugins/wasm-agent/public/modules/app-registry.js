@@ -17,10 +17,6 @@ const SPACE_APP_DEFINITIONS = [
     entry: "/modules/property-photo-cleaner/property-photo-cleaner.entry.js",
   },
   {
-    id: "browser", label: "Browser", icon: "◎", module: "browser", desktopOnly: true,
-    entry: "/modules/browser/browser.entry.js?v=20260822-surface-readiness1",
-  },
-  {
     id: "anaminese", label: "Anaminese", icon: "🎙️", module: "anaminese",
     entry: "/modules/anaminese-widget.js?v=20260803-anaminese1",
     minWidth: 320, minHeight: 280,
@@ -42,11 +38,13 @@ const SPACE_APP_DEFINITIONS = [
 // home: ["asolaria", "artifact-foundry"]
 const SPACE_APP_MAPPINGS = {
   home: [],
-  admin: ["batch-cleaner", "asolaria", "artifact-foundry", "property-photo-cleaner", "browser"],
-  user: ["batch-cleaner", "asolaria", "artifact-foundry", "property-photo-cleaner", "browser", "anaminese", "video-v1", "video-v2"],
+  admin: ["batch-cleaner", "asolaria", "artifact-foundry", "property-photo-cleaner"],
+  user: ["batch-cleaner", "asolaria", "artifact-foundry", "property-photo-cleaner", "anaminese", "video-v1", "video-v2"],
 };
 
 const mounts = new Map();
+const mountPromises = new Map();
+const lifecycleQueues = new Map();
 let onExternalAppClosed = null;
 const INTERACTION_OUTCOME_EVENT = "wasm-agent:interaction-outcome";
 
@@ -78,6 +76,15 @@ function installAppClickOutcomeCapture() {
 }
 
 installAppClickOutcomeCapture();
+
+function serializeExternalAppLifecycle(appId, task) {
+  const previous = lifecycleQueues.get(appId) || Promise.resolve();
+  const current = previous.catch(() => {}).then(task);
+  lifecycleQueues.set(appId, current);
+  return current.finally(() => {
+    if (lifecycleQueues.get(appId) === current) lifecycleQueues.delete(appId);
+  });
+}
 
 function externalHost(app) {
   const existing = document.querySelector(`[data-external-app-host="${app.id}"]`);
@@ -114,39 +121,51 @@ export function installExternalAppHosts(onClose) {
 export async function ensureExternalAppMounted(app) {
   if (!app?.entry) return null;
   if (mounts.has(app.id)) return mounts.get(app.id);
-  const host = externalHost(app);
-  const mountRoot = host.querySelector(`[data-external-app-mount="${app.id}"]`);
+  if (mountPromises.has(app.id)) return mountPromises.get(app.id);
+  const pending = (async () => {
+    const host = externalHost(app);
+    const mountRoot = host.querySelector(`[data-external-app-mount="${app.id}"]`);
+    try {
+      const module = await import(app.entry);
+      if (typeof module.mount !== "function") throw new Error(`${app.id} has no mount export`);
+      const api = await module.mount({
+        host,
+        mountRoot,
+        onClose: () => closeExternalApp(app.id),
+      });
+      mounts.set(app.id, api || {});
+      host.dispatchEvent(new CustomEvent("external-app-mounted", { bubbles: true, detail: { appId: app.id } }));
+      return api;
+    } catch (error) {
+      host.dataset.mountError = String(error?.message || error).slice(0, 240);
+      host.hidden = true;
+      throw error;
+    }
+  })();
+  mountPromises.set(app.id, pending);
   try {
-    const module = await import(app.entry);
-    if (typeof module.mount !== "function") throw new Error(`${app.id} has no mount export`);
-    const api = await module.mount({
-      host,
-      mountRoot,
-      onClose: () => closeExternalApp(app.id),
-    });
-    mounts.set(app.id, api || {});
-    host.dispatchEvent(new CustomEvent("external-app-mounted", { bubbles: true, detail: { appId: app.id } }));
-    return api;
-  } catch (error) {
-    host.dataset.mountError = String(error?.message || error).slice(0, 240);
-    host.hidden = true;
-    throw error;
+    return await pending;
+  } finally {
+    if (mountPromises.get(app.id) === pending) mountPromises.delete(app.id);
   }
 }
 
 export async function closeExternalApp(appId) {
-  const app = SPACE_APP_DEFINITIONS.find((item) => item.id === appId);
-  if (!app) return false;
-  const host = document.querySelector(`[data-external-app-host="${app.id}"]`);
-  const api = mounts.get(app.id);
-  if (typeof api?.close === "function") await api.close();
-  else if (typeof api?.destroy === "function") await api.destroy();
-  mounts.delete(app.id);
-  host?.querySelector(`[data-external-app-mount="${app.id}"]`)?.replaceChildren();
-  if (host) host.hidden = true;
-  host?.dispatchEvent(new CustomEvent("external-app-unmounted", { bubbles: true, detail: { appId } }));
-  onExternalAppClosed?.(appId);
-  return true;
+  return serializeExternalAppLifecycle(appId, async () => {
+    const app = SPACE_APP_DEFINITIONS.find((item) => item.id === appId);
+    if (!app) return false;
+    await mountPromises.get(app.id)?.catch(() => {});
+    const host = document.querySelector(`[data-external-app-host="${app.id}"]`);
+    const api = mounts.get(app.id);
+    if (typeof api?.close === "function") await api.close();
+    else if (typeof api?.destroy === "function") await api.destroy();
+    mounts.delete(app.id);
+    host?.querySelector(`[data-external-app-mount="${app.id}"]`)?.replaceChildren();
+    if (host) host.hidden = true;
+    host?.dispatchEvent(new CustomEvent("external-app-unmounted", { bubbles: true, detail: { appId } }));
+    onExternalAppClosed?.(appId);
+    return true;
+  });
 }
 
 export function externalAppsToHydrate(apps = [], layout = {}) {
@@ -155,45 +174,74 @@ export function externalAppsToHydrate(apps = [], layout = {}) {
 
 export async function hydrateOpenExternalApps(apps = [], layout = {}) {
   return Promise.allSettled(externalAppsToHydrate(apps, layout).map(async (app) => {
-    await ensureExternalAppMounted(app);
     const host = externalHost(app);
     host.hidden = false;
+    try {
+      await ensureExternalAppMounted(app);
+    } catch (error) {
+      host.hidden = true;
+      throw error;
+    }
     return app.id;
   }));
 }
 
 export async function openExternalAppFromIcon(app, currentMinimized, onMinimizedChange) {
   if (!app?.entry) return false;
-  const host = externalHost(app);
-  const nextMinimized = !Boolean(currentMinimized);
-  emitInteractionOutcome({ widget: app.id, action: "widget.toggle", outcome: "started", reason: nextMinimized ? "minimize" : "open" });
-  try {
-    if (!nextMinimized) await ensureExternalAppMounted(app);
+  return serializeExternalAppLifecycle(app.id, async () => {
+    const host = externalHost(app);
+    const nextMinimized = !Boolean(currentMinimized);
+    emitInteractionOutcome({ widget: app.id, action: "widget.toggle", outcome: "started", reason: nextMinimized ? "minimize" : "open" });
+    try {
+    const mounted = mounts.get(app.id);
+    if (nextMinimized && typeof mounted?.hide === "function") await mounted.hide();
     host.hidden = nextMinimized;
     onMinimizedChange?.(nextMinimized);
+    if (!nextMinimized) {
+      try {
+        const alreadyMounted = mounts.has(app.id);
+        const api = await ensureExternalAppMounted(app);
+        if (alreadyMounted && typeof api?.show === "function") await api.show();
+      } catch (error) {
+        host.hidden = true;
+        onMinimizedChange?.(true);
+        throw error;
+      }
+    }
     emitInteractionOutcome({ widget: app.id, action: "widget.toggle", outcome: nextMinimized ? "minimized" : "opened" });
-    return !nextMinimized;
-  } catch (error) {
-    emitInteractionOutcome({ widget: app.id, action: "widget.toggle", outcome: "failed", reason: error?.message || error });
-    throw error;
-  }
+      return !nextMinimized;
+    } catch (error) {
+      emitInteractionOutcome({ widget: app.id, action: "widget.toggle", outcome: "failed", reason: error?.message || error });
+      throw error;
+    }
+  });
 }
 
 export async function ensureExternalAppOpen(app, currentMinimized, onMinimizedChange) {
   if (!app?.entry) return { opened: false, alreadyOpen: false };
-  const host = externalHost(app);
-  const alreadyOpen = currentMinimized === false && mounts.has(app.id) && host.hidden === false;
-  emitInteractionOutcome({ widget: app.id, action: "widget.open", outcome: "started", reason: alreadyOpen ? "already_open" : "ensure_open" });
-  try {
-    await ensureExternalAppMounted(app);
+  return serializeExternalAppLifecycle(app.id, async () => {
+    const host = externalHost(app);
+    const alreadyOpen = currentMinimized === false && mounts.has(app.id) && host.hidden === false;
+    emitInteractionOutcome({ widget: app.id, action: "widget.open", outcome: "started", reason: alreadyOpen ? "already_open" : "ensure_open" });
+    try {
     host.hidden = false;
     if (!alreadyOpen) onMinimizedChange?.(false);
+    try {
+      const alreadyMounted = mounts.has(app.id);
+      const api = await ensureExternalAppMounted(app);
+      if (alreadyMounted && typeof api?.show === "function") await api.show();
+    } catch (error) {
+      host.hidden = true;
+      if (!alreadyOpen) onMinimizedChange?.(true);
+      throw error;
+    }
     emitInteractionOutcome({ widget: app.id, action: "widget.open", outcome: alreadyOpen ? "already_open" : "opened" });
-    return { opened: true, alreadyOpen };
-  } catch (error) {
-    emitInteractionOutcome({ widget: app.id, action: "widget.open", outcome: "failed", reason: error?.message || error });
-    throw error;
-  }
+      return { opened: true, alreadyOpen };
+    } catch (error) {
+      emitInteractionOutcome({ widget: app.id, action: "widget.open", outcome: "failed", reason: error?.message || error });
+      throw error;
+    }
+  });
 }
 
 export { INTERACTION_OUTCOME_EVENT, SPACE_APP_DEFINITIONS, SPACE_APP_MAPPINGS };

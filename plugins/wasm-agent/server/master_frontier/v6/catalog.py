@@ -10,6 +10,26 @@ from . import contracts
 TOKENS = re.compile(r"[a-z0-9]+")
 
 
+def _field_hint(field: dict[str, Any], *, depth: int = 0) -> str:
+    if "default" in field:
+        return contracts.canonical(field.get("default"))
+    enum = field.get("enum") if isinstance(field.get("enum"), list) else []
+    if enum and len(enum) <= 8:
+        return "|".join(str(item) for item in enum)
+    kind = str(field.get("type") or "value")
+    if depth < 2 and kind == "object":
+        properties = field.get("properties") if isinstance(field.get("properties"), dict) else {}
+        required = {str(item) for item in (field.get("required") or [])}
+        inner = ",".join(
+            f"{name}{'!' if name in required else '?'}:{_field_hint(raw if isinstance(raw, dict) else {}, depth=depth + 1)}"
+            for name, raw in list(properties.items())[:6]
+        )
+        return "{" + inner + "}"
+    if depth < 1 and kind == "array" and isinstance(field.get("items"), dict):
+        return "[" + _field_hint(field["items"], depth=depth + 1) + "]"
+    return kind
+
+
 def compact_capability(item: dict[str, Any]) -> dict[str, Any]:
     """Project an executable argument hint without replaying the full schema."""
     schema = item.get("input") if isinstance(item.get("input"), dict) else {}
@@ -18,9 +38,7 @@ def compact_capability(item: dict[str, Any]) -> dict[str, Any]:
     arguments = []
     for name, raw in list(properties.items())[:8]:
         field = raw if isinstance(raw, dict) else {}
-        default = field.get("default")
-        enum = field.get("enum") if isinstance(field.get("enum"), list) else []
-        value = contracts.canonical(default if "default" in field else enum[0]) if "default" in field or len(enum) == 1 else str(field.get("type") or "value")
+        value = _field_hint(field)
         arguments.append(f"{name}={value}{'!' if name in required else '?'}")
     summary = str(item.get("summary") or "")
     if arguments:

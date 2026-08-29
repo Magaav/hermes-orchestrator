@@ -11,7 +11,7 @@ InvokeKernel = Callable[[str, dict[str, Any]], dict[str, Any]]
 
 
 class InternalHandler:
-    headers: dict[str, str] = {}
+    headers: dict[str, str] = {"Host": "127.0.0.1"}
     client_address = ("127.0.0.1", 0)
 
 

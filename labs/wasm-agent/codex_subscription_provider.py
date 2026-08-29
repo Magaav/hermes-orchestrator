@@ -35,6 +35,25 @@ PRIMARY_ATTEMPT_MAX_SEC = 30
 STATUS_TELEMETRY_SCHEMA = "hermes.wasm_agent.provider_status.v1"
 LUNA_RECOVERY_MODEL = "gpt-5.6-terra"
 COMPACTION_RATIO = 0.72
+DECISION_THREAD_MAX_TURNS = 4
+APP_SERVER_MAX_LINE_BYTES = 8 * 1024 * 1024
+DECISION_THREAD_ISOLATION = {
+    "dynamicTools": [],
+    "environments": [],
+    "selectedCapabilityRoots": [],
+    "personality": "none",
+}
+
+
+def decision_thread_isolation() -> dict[str, Any]:
+    if os.environ.get("MF_CODEX_DECISION_THREAD_ISOLATION", "1").strip().lower() in {"0", "false", "off"}:
+        return {}
+    return dict(DECISION_THREAD_ISOLATION)
+
+
+def decision_thread_rotation_due(turn_count: int) -> bool:
+    """Bound cached provider context; the host projection is the source of truth."""
+    return max(0, int(turn_count or 0)) >= DECISION_THREAD_MAX_TURNS
 
 
 def _enforce_status_telemetry(
@@ -214,6 +233,7 @@ class _AppServerWorker:
         self.fork_reason = ""
         self.notifications: list[dict[str, Any]] = []
         self.rate_limits: dict[str, Any] = {}
+        self.stdout_buffer = bytearray()
         self.root = codex_conversation_state.decision_cwd()
         env = {
             key: value for key, value in os.environ.items()
@@ -227,7 +247,7 @@ class _AppServerWorker:
             self.process = subprocess.Popen(
                 [executable, "app-server", "--stdio"], cwd=str(self.root), env=env,
                 stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                text=True, bufsize=1,
+                bufsize=0,
             )
             self._initialize()
         except BaseException:
@@ -255,25 +275,35 @@ class _AppServerWorker:
         message: dict[str, Any] = {"method": method, "params": params}
         if not notification:
             message["id"] = self.request_id
-        self.process.stdin.write(json.dumps(message, separators=(",", ":")) + "\n")
+        self.process.stdin.write((json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8"))
         self.process.stdin.flush()
         return self.request_id
 
     def _read(self, deadline: float) -> dict[str, Any]:
         if self.process.stdout is None:
             raise CodexAppServerFailure("Codex app-server stdout is unavailable.")
+        buffered = self.stdout_buffer
         while time.monotonic() < deadline:
+            newline = buffered.find(b"\n")
+            if newline >= 0:
+                raw = bytes(buffered[:newline])
+                del buffered[:newline + 1]
+                if not raw.strip():
+                    continue
+                try:
+                    return json.loads(raw.decode("utf-8"))
+                except (UnicodeDecodeError, ValueError):
+                    continue
             remaining = max(0.0, deadline - time.monotonic())
-            ready, _, _ = select.select([self.process.stdout], [], [], remaining)
+            ready, _, _ = select.select([self.process.stdout.fileno()], [], [], remaining)
             if not ready:
                 raise CodexAppServerFailure("Codex app-server response timed out.")
-            line = self.process.stdout.readline()
-            if not line:
+            chunk = os.read(self.process.stdout.fileno(), 65_536)
+            if not chunk:
                 raise CodexAppServerFailure("Codex app-server closed its output stream.")
-            try:
-                return json.loads(line)
-            except ValueError:
-                continue
+            buffered.extend(chunk)
+            if len(buffered) > APP_SERVER_MAX_LINE_BYTES:
+                raise CodexAppServerFailure("Codex app-server response exceeded the JSONL line limit.")
         raise CodexAppServerFailure("Codex app-server response timed out.")
 
     def _response(self, request_id: int, deadline: float) -> dict[str, Any]:
@@ -293,9 +323,12 @@ class _AppServerWorker:
 
     def _initialize(self) -> None:
         deadline = time.monotonic() + 15
-        request_id = self._send("initialize", {"clientInfo": {
-            "name": "wasm_agent_master_frontier", "title": "WASM Agent Master Frontier", "version": "6",
-        }})
+        request_id = self._send("initialize", {
+            "clientInfo": {
+                "name": "wasm_agent_master_frontier", "title": "WASM Agent Master Frontier", "version": "6",
+            },
+            "capabilities": {"experimentalApi": True},
+        })
         self._response(request_id, deadline)
         self._send("initialized", {}, notification=True)
         persisted = codex_conversation_state.load(self.state_key)
@@ -306,12 +339,14 @@ class _AppServerWorker:
         thread_params = {
             "model": self.model, "cwd": str(self.root), "approvalPolicy": "never",
             "sandbox": "read-only",
+            **decision_thread_isolation(),
             "baseInstructions": (
                 "You are the decision head inside an external deterministic tool loop. "
                 "Never inspect files, execute commands, browse, call MCP, or use Codex-owned tools. "
                 "Return only the structured decision requested by the host."
             ),
         }
+        self.thread_params = thread_params
         result: dict[str, Any] = {}
         if persisted_thread and persisted_digest == self.tool_digest:
             try:
@@ -337,6 +372,21 @@ class _AppServerWorker:
         self.rate_limits = _rate_limits_from_app_server(self._response(request_id, deadline))
         self._persist()
 
+    def _rotate_thread(self, deadline: float, reason: str) -> None:
+        request_id = self._send("thread/start", {
+            **self.thread_params, "ephemeral": False, "serviceName": "wasm-agent-master-frontier",
+        })
+        result = self._response(request_id, deadline)
+        thread_id = str((result.get("thread") or {}).get("id") or "")
+        if not thread_id:
+            raise CodexAppServerFailure("Codex app-server did not rotate the decision thread.")
+        self.thread_id = thread_id
+        self.turn_count = 0
+        self.compaction_status = "none"
+        self.resumed = False
+        self.fork_reason = str(reason or "bounded_decision_turns")
+        self._persist()
+
     def _persist(self) -> None:
         codex_conversation_state.save(self.state_key, {
             "thread_id": self.thread_id, "tool_digest": self.tool_digest, "model": self.model,
@@ -357,6 +407,8 @@ class _AppServerWorker:
     ) -> dict[str, Any]:
         with self.lock:
             deadline = time.monotonic() + max(1, min(timeout, 300))
+            if decision_thread_rotation_due(self.turn_count):
+                self._rotate_thread(deadline, "bounded_decision_turns")
             prompt = (
                 _prompt(messages, tools, completion_only, require_tool)
                 if self.turn_count == 0

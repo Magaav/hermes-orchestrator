@@ -167,6 +167,15 @@ def _inside(path: Path, roots: list[Path]) -> bool:
     return any(path == root or root in path.parents for root in roots)
 
 
+def _workspace_relative(path: Path, root: Path) -> str:
+    """Keep allowed cross-root search paths directly reusable by repo.read."""
+    try:
+        relative = path.relative_to(root)
+    except ValueError:
+        relative = Path(os.path.relpath(path, root))
+    return relative.as_posix()
+
+
 def _query_patterns(query: str, interpretations: list[Any]) -> list[tuple[str, re.Pattern[str]]]:
     phrases = [query, *[str(item).strip() for item in interpretations if str(item).strip()]]
     atoms: list[str] = []
@@ -266,9 +275,9 @@ def compound_discover(
     for include in sorted(includes):
         base = (root / include).resolve()
         if not _inside(base, allowed) or not base.exists(): excluded_roots.append(include); continue
-        searched.append(str(base.relative_to(root)) if base != root else ".")
+        searched.append(_workspace_relative(base, root) if base != root else ".")
         for path in _stream_files(base, root, excludes):
-            stop(); rel = str(path.relative_to(root)).replace("\\", "/")
+            stop(); rel = _workspace_relative(path, root)
             if any(fnmatch.fnmatch(rel, pattern.lstrip("./")) for pattern in excludes): continue
             if path.suffix.lower() not in TEXT_SUFFIXES: continue
             try:

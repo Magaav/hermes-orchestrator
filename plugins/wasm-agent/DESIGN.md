@@ -374,15 +374,31 @@ Read it before changing `public/index.html`, `public/styles.css`, or
   may clamp directly to the app viewport edge on narrow screens; the
   panel-to-avatar spacing follows the avatar inset. When edge-to-edge chat
   overlaps the avatar, the chat panel layers above the avatar.
+- The Windows companion is another viewport for this exact PWA-owned group,
+  not a native redraw or alternate component. Compact mode exposes the same
+  58px avatar token and 14px inset inside a transparent 86px top-level window;
+  opening chat expands only the native bounds needed by the same 430x620 panel.
+  Native dragging samples the absolute OS cursor in one bounded drag session,
+  preserves the expanded window dimensions, and persists only at drag end.
+  Sessions, Settings, Close, inputs, selects, and links in the chat header are
+  interactive controls and must never start or capture a window drag.
+  Companion-only CSS may isolate the group and neutralize mobile fullscreen
+  rules, but must not redefine the avatar core, color, border, shadow, wake
+  animation, chat renderer, transcript state, or composer. Visual evolution is
+  a cloud-PWA deployment and must not require another Windows installer.
 - Opening the avatar opens `wasm-agent-chat` and pushes `?chat=wasm-agent-chat`
   on the current route. The chat header control is a minimize action with a
   single minus glyph, not an `x`; minimizing removes the chat URL state through
   the shared navigation stack. If the user changes spaces while chat is open,
   manual minimize must close chat in place instead of navigating back to the
   space where chat was opened.
-- Assistant action chains render above the final answer. They stay expanded
-  while the turn is running, collapse after completion, and keep the final
-  answer text below the chain.
+- Each assistant turn starts with one expandable Assistant details topic and
+  keeps its final answer below that topic. Assistant details stays expanded
+  while running, collapses when the final answer arrives, and remains
+  reopenable for change evidence, timeline, token ledger, action rows, and the
+  append-only decision trace in that order. Decision text wraps fully inside
+  the topic, so no ellipse, later inference, or later turn hides an earlier
+  public decision.
 - Master:frontier action chains use a Codex-style two-channel presentation.
   Only the accepted human answer streams into the message body; buffered public
   model decisions, semantic function calls, redacted arguments, bounded

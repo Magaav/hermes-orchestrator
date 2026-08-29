@@ -27,6 +27,7 @@ assert(manifest.artifacts.hotOps.audio.windowsAudioLoopbackProbe, "Windows audio
 assert(manifest.artifacts.hotOps.android.hermesWakeProof, "Hermes wake hot-op bundle must be present in feed");
 assert(manifest.artifacts.hotOps.android.uiInputProof, "Android UI input hot-op bundle must be present in feed");
 assert(manifest.artifacts.hotOps.diagnostics.nativeDiagnosticsClassifier, "diagnostics classifier hot-op bundle must be present in feed");
+assert(manifest.artifacts.hotOps.desktop.windowsCdpRuntimeInspect, "CDP runtime inspection hot-op bundle must be present in feed");
 
 const androidBuildConfigPath = path.join(repoRoot, "native", "android", "app", "build", "generated", "source", "buildConfig", "release", "com", "colmeio", "wasmagent", "BuildConfig.java");
 const androidOutputMetadataPath = path.join(repoRoot, "native", "android", "app", "build", "outputs", "apk", "release", "output-metadata.json");
@@ -102,6 +103,11 @@ for (const artifact of uiInputHotOp.files) {
 }
 
 const diagnosticsHotOp = manifest.artifacts.hotOps.diagnostics.nativeDiagnosticsClassifier;
+const runtimeInspectHotOp = manifest.artifacts.hotOps.desktop.windowsCdpRuntimeInspect;
+assert.strictEqual(runtimeInspectHotOp.kind, "windows-hot-op-bundle");
+assert.strictEqual(runtimeInspectHotOp.operationName, "inspect_windows_cdp_runtime");
+assert(Array.isArray(runtimeInspectHotOp.files) && runtimeInspectHotOp.files.length === 3, "CDP runtime inspection bundle must include module, manifest, and CDP transport dependency");
+assert(runtimeInspectHotOp.files.some((file) => file.role === "dependency" && file.targetPath === "desktop/windows-cdp-control.js"), "CDP runtime inspection bundle must atomically carry its transport dependency");
 assert.strictEqual(diagnosticsHotOp.kind, "windows-hot-op-bundle");
 assert.strictEqual(diagnosticsHotOp.operationName, "classify_native_diagnostics");
 assert.match(diagnosticsHotOp.bundleSha, /^[a-f0-9]{64}$/i, "diagnostics hot-op bundle must expose a bundle SHA");

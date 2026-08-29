@@ -21,13 +21,27 @@ Electron, and Android/Kotlin heartbeats normalize to one client envelope with
 runtime type, build, route, liveness, and bounded observe/control capabilities.
 Commands continue through the audited `/native/control/command` and
 `/native/control/result` paths. Exact-capability installed Electron clients may
-also advertise `control.browser.javascript.execute.unrestricted` and
 `windows.shell.execute.unrestricted`; authenticated Master:frontier can then
-queue arbitrary Browser-page JavaScript or arbitrary Windows-user PowerShell/CMD.
+queue arbitrary Windows-user PowerShell/CMD.
+Windows Electron clients may additionally advertise bounded
+`windows.desktop.describe/inspect/act/prove` capabilities. Master:frontier must
+inspect first, act only through a returned short-lived element ref, and require
+an independently reacquired scalar postcondition before claiming completion.
+This UIA lane inherits only the installed app's current Windows user token; it
+does not claim Administrator, SYSTEM, or UAC secure-desktop authority.
 The server validates only the bounded transport envelope, not command semantics.
 Native clients reuse their existing control loop, while a
 plain PWA starts one visibility-aware 15-second loop from
 `public/modules/client-presence.js`.
+That heartbeat carries a versioned active-surface widget manifest. Widget
+actions fail before queueing when the current space does not contain the target,
+and a successful open requires a current visible-widget proof rather than a bare
+command acknowledgement. The heartbeat advertises, but does not embed, an
+on-demand `client.space.catalog` capability. That bounded read lists only the
+authenticated spaces visible to the client and intersects each space's widget
+IDs with route authority, so the head can discover an owner before opening the
+exact space. Home and authorized admin surfaces share the same space-open
+contract as user-created spaces.
 
 All client envelopes advertise an explicit on-demand observability shape.
 Electron and Android advertise `observe.cdp.on_demand`; PWA advertises
@@ -76,6 +90,13 @@ audit, persistence, and replay; the head sees the compact dictionary-backed
 MCP capabilities remain pull-on-demand. Discovery includes a bounded argument
 signature with required markers and declared defaults, so simple capabilities
 can execute immediately while complex schemas remain behind `detail`.
+The `v6/trajectory.py` owner records every provider-visible context and tool
+contract, provider result, semantic/tool transition, checkpoint, and terminal
+state as a bounded hash-linked event over the existing run-event persistence
+lane. Checkpoints cache a verified stream head; resumed runs bind their parent
+head. `v6/execution_profiles.py` owns the route-selected `minimal`, `semantic`,
+and `code_orchestrated` profiles without changing the four-tool surface, and
+`v6/tool_compat.py` owns fail-closed versioned argument normalization.
 Independent non-conflicting operations
 run concurrently; mutations use conflict domains and an exactly-once ledger.
 Action requests also carry a bounded model-declared goal ledger inside the
@@ -85,7 +106,10 @@ terminal operation ends only itself while any sibling goal remains pending;
 final completion requires every declared goal to be satisfied. Compound actions
 stay in one dependency DAG. The first execute-shaped response is persisted as a
 non-executing proposal; one mandatory audit inference must compare it with every
-clause of the original goal before the reviewed DAG may execute.
+clause of the original goal before the reviewed DAG may execute. Read-only setup
+observations may execute before that proposal without goal bindings; they cannot
+satisfy `goal_action`. This lets bounded discovery ground the later reviewed
+write DAG without a duplicate observation command.
 Exact catalog-backed capabilities named by that non-executing proposal become
 visible to its mandatory audit, avoiding a redundant discovery turn; unknown
 capability IDs still fail closed before execution.
@@ -101,16 +125,38 @@ If a proof-bound reviewed action fails and remains causally open, a subsequent
 final decision terminates with a host-shaped failure answer; unsatisfied success
 gates still prevent any success claim, but they do not turn an honest failure
 report into a no-semantic-progress interruption.
+An ambiguous semantic stall instead carries one bounded controller-owned
+`STALL/1` packet into exactly one tool-free diagnostic inference. That closeout
+separates observed facts from ranked inferred causes, names one read-only next
+check, leaves action goals blocked, and terminates. Invalid structured output or
+provider failure uses a deterministic projection of the same packet without a
+second diagnostic call. The explicit debug-stall fixture intentionally carries
+no real-run packet and retains its zero-provider fallback contract.
 Page-entity observations prove existence only. A later mutation must establish
 and verify the active target inside its own operation and wait for asynchronous
 UI state before interacting; transcript continuity cannot substitute for live
 selection state.
 Model-authored commentary is emitted from the operation it explains, and final
 completion requires declared semantic capabilities plus terminal integrity.
+Non-conceptual V6 answers also use `master.frontier.v6.final_claims.v1`: every
+material claim declares `route`, `source`, `runtime`, `action`, `verification`,
+or `external` scope and cites the evidence/operation IDs it consumed. The
+controller rejects prose-only finals, unviewed read receipts, scope mismatches,
+and runtime claims without capability-declared proof. This gate is generic;
+the observed Windows-control miss is a regression fixture, not a prompt-term
+selector. Local contract tests do not prove the changed server is deployed.
+If a conceptual/plain turn consumes successful evidence from a declared runtime
+inspection authority, V6 upgrades that turn to the same claim-bound final gate.
+Plain answers also reject malformed JSON-shaped fragments and use the existing
+bounded repair turn instead of recording the fragment as completed.
 The ChatGPT-authenticated Codex app-server head keeps the route provider deadline
 fixed: a cold first-turn stall is discarded after 30 seconds and retried once on
 a fresh worker with only the remaining time. Established threads and non-timeout
 failures are never replayed by this recovery path.
+The stdio adapter frames app-server JSONL from one bounded binary buffer per
+worker. Readiness checks and line consumption therefore share one source of
+truth; a burst containing `item/completed`, usage, and `turn/completed` cannot
+leave prefetched terminal events hidden behind an OS-level readiness wait.
 Each stable account session, route, and model now owns a non-ephemeral Codex
 thread. A bounded atomic index under private wasm-agent state resumes that thread
 after worker eviction or service restart without storing prompt or transcript
@@ -120,6 +166,15 @@ requests native app-server compaction and persists its generation/status; the
 run ledger exposes the thread id, turn, resume/fork state, and compaction state.
 Action completion still comes only from the separate host proof/operation ledger.
 See `../MASTER_FRONTIER_V6.md`.
+
+`master_frontier/v6/procedure_memory.py` owns the optional exact-repeat read
+lane. Two independent provider-proven terminal reads calibrate an
+account/route/topology/capability-bound entry; the next byte-equivalent
+whitespace-normalized objective may execute that read without provider
+inference but still requires a fresh capability receipt and declared proof.
+The lane never learns writes, required arguments, batches, or paraphrases and
+fails open to ordinary V6 on store errors. Set `MF_V6_PROCEDURE_MEMORY=0` for
+immediate rollback.
 
 `POST /agent/provider/envelope` and
 `POST /agent/provider/envelope/stream` are the compact LLM-native head lanes
@@ -254,16 +309,22 @@ The canonical `horc space restart` path was subsequently run without an
 inherited anchor variable; cloud configuration restored anchoring and a second
 authenticated production canary passed the same terminal-chain checks.
 
-V6 production proof on 2026-08-05 is split by authority and behavior. The
+V6 production proof refreshed on 2026-08-25 is split by authority and behavior. The
 read-only non-admin canary report at
 `reports/context/latest/master-frontier-v6-authenticated-canary.json` proves an
 objective-bound source read, exact usage, zero changed files, a clear completion
 gate, terminal anchor verification, and revocation. The explicitly stateful
 admin report at `reports/context/latest/master-frontier-v6-client-ui.json`
-proves that V6 selected the live Electron renderer declaring
-`control.widget.open`, opened widget id `browser`, received its acknowledgement,
-verified the finished native-control artifact, recorded a model-authored public
-progress update, and only then completed. This is
+proves that V6 binds widget authority to the live Electron renderer's active
+space manifest, refuses to queue Browser when Space Home declares no Browser
+widget, blocks that action goal, and returns an explicit unavailable result.
+The stateful ownership-discovery report at
+`reports/context/latest/master-frontier-v6-space-widget-discovery.json` proves
+the complementary path: from `space-home`, one bounded catalog identifies
+`space-admin` as the Browser owner; one proved space transition immediately
+advances the cached surface; and one widget action verifies Browser visible.
+The run completes in exactly four provider calls with no failed tool, retry,
+completion gap, or stall diagnostic. This is
 installed-renderer behavior proof, not final NSIS/package verification or proof
 of unrelated native capabilities.
 
@@ -411,3 +472,15 @@ requires kernel resolution/inspection/proof before answering. Do not add
 product names, node names, selectors, or one-off prompt affordances to handle
 an observed miss; add or fix the generic kernel contract or route registry and
 prove it with the observed case as a fixture.
+Master:frontier V6 client turns scope their initially visible capabilities from
+the live client's `active_execution_realm`; prompt words do not change that
+realm. The model performs semantic tool selection inside that bounded native or
+browser capability surface, and the stable discover tool remains available for
+detail. Its provider-decision ceiling is the smaller
+of the execution profile maximum and the route-owned `api_calls_max`; route call
+budgets are therefore operational loop bounds, not merely diagnostics.
+When native Windows capabilities are present, topology declares separate
+`native_windows` and `browser_sandbox` execution realms and identifies exactly
+one as active. The renderer is a presentation surface; a native connection
+exposes Windows primitives, while a browser-only connection exposes sandbox
+capabilities. Request keywords never switch authority realms.

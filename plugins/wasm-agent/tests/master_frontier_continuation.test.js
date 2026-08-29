@@ -121,3 +121,9 @@ for (const status of ["cancelled", "failed"]) {
     process.exitCode = 1;
   });
 }
+
+for (const code of ["v6_provider_interrupted", "v6_run_cancelled"]) {
+  const result = disposition({ diagnostic: { code, message: "V6 provider stopped" } });
+  assert.strictEqual(result.interrupted, true);
+  assert.strictEqual(result.terminal, "interrupted");
+}

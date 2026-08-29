@@ -1,0 +1,79 @@
+{
+  "baseline": {
+    "cached_input_tokens": 22272,
+    "capability": "client.windows.browser.cdp.default.open",
+    "fresh_input_tokens": 24407,
+    "goal_contract": "reviewed",
+    "input_tokens": 46679,
+    "latency_ms": 37883,
+    "limitations": [
+      "the production worker had not loaded host_bounded_terminal",
+      "provider cache behavior changed between repeated runs",
+      "the pilot benchmark does not include natural-language classification or native execution latency"
+    ],
+    "objective": "open it again",
+    "output_tokens": 303,
+    "provider_calls": 2,
+    "required_proof": "windows.browser.cdp.persistent.ready",
+    "route_id": "wasm-agent.avatar-chat.ui",
+    "run_id": "wa_run_0a5b128cbecc4ddda9ca11ba83abc483",
+    "schema": "mf-v7.pilot.live-baseline.v1",
+    "source": "read-only production agent_run_tb and agent_token_ledger_tb inspection",
+    "total_tokens": 46982
+  },
+  "checks": {
+    "accountBoundaryRequiresRediscovery": true,
+    "compactMapFindsProcedures": true,
+    "crossSessionReuseWorks": true,
+    "environmentDriftPrunes": true,
+    "freshProofStillRequired": true,
+    "nonBrowserLiveTrajectoryReusable": true,
+    "outputSemanticsPreserved": true,
+    "procedureLaneUsesNoProvider": true,
+    "proofCompleteTrajectoryCompiled": true
+  },
+  "comparison": {
+    "fresh_input_tokens_avoided_after_match": 24407,
+    "provider_activity_tokens_avoided_after_match": 46982,
+    "provider_calls_avoided_after_match": 2,
+    "quality_proxy": "same capability + same required proof + fresh receipt + equivalent bounded answer"
+  },
+  "decision": "retain-candidate",
+  "limitations": {
+    "claim": "This proves reusable procedure storage, retrieval, cross-session scope, fresh-proof execution, and invalidation. It does not prove end-to-end zero-token routing.",
+    "nativeExecutionLatencyIncluded": false,
+    "naturalLanguageClassificationIncluded": false,
+    "productionRoutingChanged": false
+  },
+  "next_gate": "Semantic router A/B failed held-out coverage and was pruned; retain structured proof only and do not bootstrap MF-v7.",
+  "pilot": {
+    "answer": "Opened browser_cdp_persistent with fresh readiness proof.",
+    "map_bytes": 489,
+    "procedure_kernel_ms": 0.112,
+    "procedure_provider_calls": 0,
+    "procedure_provider_tokens": 0,
+    "state": "promoted",
+    "windows_answer": "12 visible Windows were freshly listed."
+  },
+  "schema": "master.frontier.v7.procedure-pilot.benchmark.v1",
+  "windows_baseline": {
+    "capability": "client.windows.desktop.windows.list",
+    "changed_files": [],
+    "classification": "valid_success_with_redundant_discovery_and_answer_repair",
+    "decisions": [
+      "discover",
+      "execute",
+      "final_claims_rejected",
+      "final_claims_repaired"
+    ],
+    "fresh_proof_verified": true,
+    "latency_ms": 46513,
+    "objective": "List the visible top-level Windows application windows and report their application names.",
+    "provider_calls": 4,
+    "repeat_policy": "do_not_repeat_live_until_compiled-lane-or-v6-hot-path-is-active",
+    "required_proof": "windows.desktop.top_level_windows",
+    "run_id": "wa_run_dac5261e139b4e0ea57218f66f85a61a",
+    "schema": "mf-v7.pilot.live-baseline.v1",
+    "total_tokens": 75893
+  }
+}

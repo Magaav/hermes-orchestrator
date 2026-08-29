@@ -1,4 +1,4 @@
-const { app, BrowserWindow, Menu, WebContentsView, ipcMain, protocol, session, shell } = require("electron");
+const { app, BrowserWindow, Menu, globalShortcut, ipcMain, protocol, screen, session, shell } = require("electron");
 const fs = require("fs");
 const crypto = require("crypto");
 const os = require("os");
@@ -28,7 +28,6 @@ const {
   writeResponseBodyToClosedFile,
   windowsArtifactFromFeed,
 } = require("./windows-self-update");
-const webSurfaceManager = require("./main/web-surfaces/manager").installWebSurfaces({ ipcMain, BrowserWindow, WebContentsView, session, shell });
 const { activateOrLaunchInstaller } = require("./main/supervisor-client");
 const { startAutomaticUpdateLoop } = require("./main/automatic-updates");
 const { installAppLifecycle } = require("./main/app-lifecycle");
@@ -37,6 +36,17 @@ const { safeCookieSessionSummary } = require("./main/native-session-proof");
 const fullPowerExecutor = require("./main/full-power-executor").createFullPowerExecutor();
 const observabilityKernel = require("./main/observability-kernel").createObservabilityKernel();
 const audioStimulus = require("./main/audio-stimulus").createAudioStimulus({ execFileBounded });
+const { createCompanionOverlay } = require("./main/companion-overlay");
+const { createCompanionStartup, preferredNativeWindow } = require("./main/companion-startup");
+const { WINDOWS_DESKTOP_OPERATIONS, createWindowsDesktopControl } = require("./main/windows-desktop-control");
+const { createWindowsNativeCommands } = require("./main/windows-native-commands");
+const { createDispatcherHealth } = require("./main/dispatcher-health");
+const { createHotOpsSyncControl } = require("./main/hot-ops-sync-control");
+const { compactSyncResult, projectHotOpsCatalog } = require("./main/hot-ops-catalog");
+const { compactHeartbeat, createBridgeStatus, createKernelStatus, createRuntimeSyncStatus } = require("./main/bridge-status-projection");
+const windowsNativeCommands = createWindowsNativeCommands({ companion: () => companionOverlay, desktop: { operations: WINDOWS_DESKTOP_OPERATIONS, control: createWindowsDesktopControl() } });
+const { clearWebShellCache } = require("./main/web-shell-session");
+const { ALL_NATIVE_KERNEL_CAPABILITIES, BRIDGE_PROTOCOL_CAPABILITIES, WINDOWS_NATIVE_KERNEL_CAPABILITIES } = require("./main/native-capabilities");
 const { appAsarFingerprint, appAsarPath, appAsarProof, installedPackageProjection, sha256File, statFile } = createPackageIntegrity({
   resourcesPath: process.resourcesPath,
 });
@@ -129,6 +139,7 @@ const WINDOWS_ANDROID_OAUTH_OPERATIONS = new Set([
   "open_latest_android_report",
   "request_windows_client_update",
   "windows_shell_execute_unrestricted",
+  ...windowsNativeCommands.operations,
 ]);
 const HOT_OPERATION_PROTOCOL_VERSION = 1;
 const SHELL_PROTOCOL_VERSION = 2;
@@ -138,69 +149,7 @@ const MINIMUM_RUNNER_VERSION = "20260612";
 const HOT_OPERATION_DEFAULT_TIMEOUT_MS = 45_000;
 const HOT_OPERATION_MANIFEST_SUFFIX = ".manifest.json";
 const BRIDGE_LOG_TAIL_LIMIT = 120;
-const ALL_NATIVE_KERNEL_CAPABILITIES = [
-  "native.capabilities.runtimeLoader.v1",
-  "native.capabilities.hotOps.v1",
-  "native.capabilities.statusBus.v1",
-  "native.capabilities.diagnostics.v1",
-  "native.capabilities.fileStore.v1",
-  "native.capabilities.downloadedRuntime.v1",
-  "native.capabilities.downloadedOperations.v1",
-  "native.capabilities.deviceControl.v1",
-  "native.capabilities.audioCapture.v1",
-  "native.capabilities.modelRuntime.v1",
-  "native.capabilities.foregroundSession.v1",
-  "native.capabilities.webViewBridge.v1",
-  "native.capabilities.boundedCommand.v1",
-  "native.capabilities.auditLog.v1",
-  "native.capabilities.releaseFeedValidation.v1",
-  "native.capabilities.nativeControlPolling.v1",
-  "native.capabilities.speaker.v1",
-  "native.capabilities.crashSafeStatus.v1",
-  "native.capabilities.capabilityManifest.v1",
-  "native.capabilities.observabilityLease.v1",
-  "native.capabilities.unrestrictedExecution.v1",
-];
-const WINDOWS_NATIVE_KERNEL_CAPABILITIES = [
-  "native.capabilities.unrestrictedExecution.v1",
-  "native.capabilities.runtimeLoader.v1",
-  "native.capabilities.hotOps.v1",
-  "native.capabilities.statusBus.v1",
-  "native.capabilities.diagnostics.v1",
-  "native.capabilities.fileStore.v1",
-  "native.capabilities.downloadedRuntime.v1",
-  "native.capabilities.downloadedOperations.v1",
-  "native.capabilities.deviceControl.v1",
-  "native.capabilities.webViewBridge.v1",
-  "native.capabilities.boundedCommand.v1",
-  "native.capabilities.auditLog.v1",
-  "native.capabilities.releaseFeedValidation.v1",
-  "native.capabilities.nativeControlPolling.v1",
-  "native.capabilities.crashSafeStatus.v1",
-  "native.capabilities.capabilityManifest.v1",
-  "native.capabilities.observabilityLease.v1",
-];
-const BRIDGE_PROTOCOL_CAPABILITIES = [
-  "get_bridge_status",
-  "get_native_kernel_status",
-  "list_hot_operations",
-  "refresh_downloaded_runtime",
-  "sync_downloaded_runtime",
-  "rollback_downloaded_runtime",
-  "refresh_downloaded_hot_ops",
-  "sync_downloaded_hot_ops",
-  "run_shell_self_test",
-  "run_hot_operation",
-  "observability_enable",
-  "observability_collect",
-  "observability_disable",
-  "observability_status",
-  "windows_shell_execute_unrestricted",
-  "windows.shell.execute.unrestricted",
-];
 const bridgeLogsTail = [];
-const NATIVE_CONTROL_DEFAULT_TIMEOUT_MS = 60_000;
-const NATIVE_CONTROL_MAX_TIMEOUT_MS = 240_000;
 let selectedBackendOrigin = "";
 let nativeControlPollBusy = false;
 let nativeObsSocket = null;
@@ -210,6 +159,8 @@ let nativeObsReconnectTimer = null;
 let nativeObsSeq = 1;
 let activeNativeCommandCount = 0;
 let activeWindowsSelfUpdate = null;
+let companionOverlay = null;
+let companionStartup = null;
 let lastDownloadedRuntimeSync = { ok: false, changed: false, attemptedAt: "", syncedAt: "", feedUrl: "", error: "", status: "not_attempted", feedBundleId: "", cachedBundleId: "", activeRuntimeId: "", activeRuntimeSha: "", activeRuntimePath: "", staleReason: "", fallbackReason: "", files: [] };
 let downloadedRuntimeSyncPromise = null;
 let lastHotOperationBundleSync = { ok: false, changed: false, attemptedAt: "", syncedAt: "", feedUrl: "", error: "", feedBundleId: "", cachedBundleId: "", moduleSha: "", manifestSha: "", cachePath: "", bundles: [] };
@@ -235,6 +186,8 @@ const startupDiagnostics = {
   lastTestedUrl: "",
   lastFailureReason: null,
 };
+const dispatcherHealth = createDispatcherHealth({ audit: writeNativeControlAudit, recentLogs: recentBridgeLogsTail });
+const hotOpsSyncControl = createHotOpsSyncControl({ sync: ensureDownloadedHotOperationsFromFeed, list: listHotOperations, logs: recentBridgeLogsTail, audit: writeNativeControlAudit });
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -491,7 +444,6 @@ function nativeFatalDiagnosticsPath() {
 
 installAppLifecycle({
   app,
-  webSurfaces: webSurfaceManager,
   flushAuthCookies: (options) => flushNativeAuthCookies(options),
   fatalLogPath: nativeFatalDiagnosticsPath(),
   recoveryStatePath: path.join(nativeAppDataDir(), "main-process-recovery.json"),
@@ -1667,23 +1619,9 @@ function activeHotOperationsRoot() {
 }
 
 function hotOperationsSummary() {
+  const options = arguments[0] || {};
   const active = activeHotOperationsRoot();
-  const availableHotOps = scanHotOperationManifests().map((op) => ({
-    name: op.name,
-    version: op.version,
-    entry: op.entry,
-    manifest: op.manifest,
-    loadedFrom: op.loadedFrom,
-    sha256: op.sha256,
-    capabilities: op.capabilities,
-    requiredNativeCapabilities: op.requiredNativeCapabilities,
-    operationId: op.operationId,
-    inputsSchema: op.inputsSchema,
-    outputsSchema: op.outputsSchema,
-    safetyLimits: op.safetyLimits,
-    rollback: op.rollback,
-    timeoutMs: op.timeoutMs,
-  }));
+  const catalog = projectHotOpsCatalog(scanHotOperationManifests(), options);
   return {
     shellProtocolVersion: SHELL_PROTOCOL_VERSION,
     supportedHotOpsProtocol: HOT_OPERATION_PROTOCOL_VERSION,
@@ -1697,7 +1635,7 @@ function hotOperationsSummary() {
     localOverrideRoot: localHotOperationOverrideRoot(),
     hotOpsDisabled: hotOperationsDisabled(),
     hotOpsRequireSha: hotOperationsRequireSha(),
-    downloadedHotOpsSync: lastHotOperationBundleSync,
+    downloadedHotOpsSync: compactSyncResult(lastHotOperationBundleSync),
     downloadedRuntime: downloadedRuntimeSummary(),
     hotOpsRoots: hotOperationRoots().map((item) => ({
       kind: item.kind,
@@ -1705,7 +1643,10 @@ function hotOperationsSummary() {
       active: item.root === active.root,
       exists: item.exists,
     })),
-    availableHotOps,
+    hotOpsCatalog: catalog.catalog,
+    hotOpsCatalogOk: catalog.ok,
+    hotOpsCatalogFailureClassification: catalog.failureClassification,
+    availableHotOps: catalog.availableHotOps,
   };
 }
 
@@ -1858,22 +1799,22 @@ function bundledHotOperationSha(operationName = "") {
 }
 
 function listHotOperations() {
-  const summary = hotOperationsSummary();
+  const options = arguments[0] || {};
+  const summary = hotOperationsSummary(options);
   return {
-    ok: true,
+    ok: summary.hotOpsCatalogOk === true,
+    failureClassification: summary.hotOpsCatalogFailureClassification,
     ...summary,
-    logsTail: recentBridgeLogsTail(),
+    logsTail: options.includeLogs === true || options.include_logs === true ? recentBridgeLogsTail(20) : [],
+    logCount: bridgeLogsTail.length,
   };
 }
 
 function getBridgeStatus() {
+  const options = arguments[0] || {};
   const hotOps = hotOperationsSummary();
   const kernel = nativeKernelStatus();
-  return {
-    ok: true,
-    stable: true,
-    operation: "get_bridge_status",
-    source: "shell",
+  return createBridgeStatus({
     shellProtocolVersion: SHELL_PROTOCOL_VERSION,
     hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION,
     minimumRunnerVersion: MINIMUM_RUNNER_VERSION,
@@ -1884,19 +1825,11 @@ function getBridgeStatus() {
     arch: os.arch(),
     platform: process.platform,
     kernel,
-    nativeKernel: kernel,
     downloadedRuntime: kernel.downloadedRuntime,
-    activeDownloadedRuntimeId: kernel.activeDownloadedRuntimeId,
-    activeDownloadedRuntimeSha: kernel.activeDownloadedRuntimeSha,
-    activeHotOpBundleId: kernel.activeHotOpBundleId,
-    activeHotOpSha: kernel.activeHotOpSha,
-    syncStatus: kernel.syncStatus,
-    staleReason: kernel.staleReason,
     hotOperations: hotOps,
-    logsTail: recentBridgeLogsTail(),
-    failureClassification: null,
-    nextAction: "Run list_hot_operations, run_shell_self_test, then canary_echo.",
-  };
+    logsTail: options.includeLogs === true || options.include_logs === true ? recentBridgeLogsTail() : [],
+    logCount: bridgeLogsTail.length,
+  }, options);
 }
 
 function androidSimulatorStateRoot() {
@@ -4160,12 +4093,11 @@ async function handleWindowsNativeDiagnosticsOperation(event, operation) {
   }
   if (opName === "get_native_kernel_status") {
     await ensureDownloadedRuntimeFromFeed(payload);
-    await ensureDownloadedHotOperationsFromFeed(payload);
-    return { ok: true, operation: opName, kernel: nativeKernelStatus(), logsTail: recentBridgeLogsTail() };
+    return createKernelStatus(nativeKernelStatus(), recentBridgeLogsTail(), payload);
   }
   if (opName === "refresh_downloaded_runtime" || opName === "sync_downloaded_runtime") {
     const downloadedRuntimeSync = await ensureDownloadedRuntimeFromFeed({ ...payload, forceSync: true });
-    return { ok: downloadedRuntimeSync.ok === true, operation: opName, downloadedRuntimeSync, downloadedRuntime: downloadedRuntimeSummary(), logsTail: recentBridgeLogsTail() };
+    return createRuntimeSyncStatus(opName, downloadedRuntimeSync, downloadedRuntimeSummary(), recentBridgeLogsTail(), payload);
   }
   if (opName === "rollback_downloaded_runtime") {
     const result = rollbackDownloadedRuntimeToLastKnownGood();
@@ -4176,15 +4108,8 @@ async function handleWindowsNativeDiagnosticsOperation(event, operation) {
     await ensureDownloadedHotOperationsFromFeed(payload);
     return runHotOperation(event.sender, opId, payload);
   }
-  if (opName === "list_hot_operations") {
-    await ensureDownloadedRuntimeFromFeed(payload);
-    await ensureDownloadedHotOperationsFromFeed(payload);
-    return listHotOperations();
-  }
-  if (opName === "refresh_downloaded_hot_ops" || opName === "sync_downloaded_hot_ops") {
-    const downloadedHotOpsSync = await ensureDownloadedHotOperationsFromFeed({ ...payload, forceSync: true });
-    return { ok: downloadedHotOpsSync.ok === true, operation: opName, downloadedHotOpsSync, logsTail: recentBridgeLogsTail() };
-  }
+  const hotOpsControl = hotOpsSyncControl.handle(opName, payload);
+  if (hotOpsControl.handled) return hotOpsControl.result;
   if (opName === "run_shell_self_test") {
     await ensureDownloadedRuntimeFromFeed(payload);
     await ensureDownloadedHotOperationsFromFeed(payload);
@@ -5247,7 +5172,7 @@ async function postNativeEvent(kind, payload = {}) {
 }
 
 function currentNativeWindow() {
-  return BrowserWindow.getAllWindows().find((win) => win && !win.isDestroyed()) || null;
+  return preferredNativeWindow(BrowserWindow.getAllWindows());
 }
 
 function currentRendererUrl() {
@@ -5614,46 +5539,6 @@ async function postNativeControlResult(command, result = {}) {
   }
 }
 
-function nativeControlCommandTimeoutMs(command = {}) {
-  const payload = command && typeof command.payload === "object" ? command.payload : {};
-  const requested = Number(payload.nativeControlTimeoutMs || payload.native_control_timeout_ms || payload.commandTimeoutMs || payload.command_timeout_ms || 0);
-  if (Number.isFinite(requested) && requested > 0) {
-    return Math.max(1000, Math.min(requested, NATIVE_CONTROL_MAX_TIMEOUT_MS));
-  }
-  const type = String(command.type || "");
-  if (type === "run_hot_operation") {
-    const hotOpRequested = Number(payload.timeoutMs || payload.timeout_ms || payload.args?.timeoutMs || payload.args?.timeout_ms || 0);
-    if (Number.isFinite(hotOpRequested) && hotOpRequested > 0) {
-      return Math.max(1000, Math.min(hotOpRequested + 15_000, NATIVE_CONTROL_MAX_TIMEOUT_MS));
-    }
-    return 75_000;
-  }
-  if (type === "windows_shell_execute_unrestricted") {
-    const shellRequested = Number(payload.timeoutMs || payload.timeout_ms || 0);
-    if (Number.isFinite(shellRequested) && shellRequested > 0) {
-      return Math.max(1000, Math.min(shellRequested + 5_000, NATIVE_CONTROL_MAX_TIMEOUT_MS));
-    }
-  }
-  if (type === "run_shell_self_test") return 10_000;
-  return NATIVE_CONTROL_DEFAULT_TIMEOUT_MS;
-}
-
-function nativeControlTimeoutResult(command = {}, timeoutMs = NATIVE_CONTROL_DEFAULT_TIMEOUT_MS, startedAt = new Date().toISOString()) {
-  const type = String(command.type || "unknown");
-  return {
-    ok: false,
-    operation: type,
-    error: "handler_timeout",
-    failureClassification: "handler_timeout",
-    started_at: startedAt,
-    completed_at: new Date().toISOString(),
-    timedOut: true,
-    timeoutMs,
-    message: `Native-control handler timed out after ${timeoutMs}ms.`,
-    logsTail: recentBridgeLogsTail(),
-  };
-}
-
 function nativeControlConstantSelfTestResult() {
   const config = ensureConfig();
   return {
@@ -5685,36 +5570,6 @@ function isRunShellSelfTestNativeControlCommand(command = {}) {
   return candidates.some((value) => String(value || "") === "run_shell_self_test");
 }
 
-async function executeNativeControlCommandWithWatchdog(command = {}) {
-  const timeoutMs = nativeControlCommandTimeoutMs(command);
-  const startedAt = new Date().toISOString();
-  let timeoutHandle = null;
-  let timedOut = false;
-  const handlerPromise = executeNativeControlCommand(command);
-  handlerPromise.catch((error) => {
-    if (timedOut) {
-      writeNativeControlAudit({
-        action: "command_late_rejection_after_timeout",
-        id: command.id || "",
-        type: command.type || "",
-        error: String(error && error.message ? error.message : error),
-      });
-    }
-  });
-  const timeoutPromise = new Promise((resolve) => {
-    timeoutHandle = setTimeout(() => {
-      timedOut = true;
-      const result = nativeControlTimeoutResult(command, timeoutMs, startedAt);
-      writeNativeControlAudit({ action: "command_timeout", id: command.id || "", type: command.type || "", timeoutMs, result });
-      resolve(result);
-    }, timeoutMs);
-    timeoutHandle.unref();
-  });
-  const result = await Promise.race([handlerPromise, timeoutPromise]);
-  if (timeoutHandle) clearTimeout(timeoutHandle);
-  return result && typeof result === "object" ? result : { ok: false, error: "result_seen_wrong_shape", failureClassification: "result_seen_wrong_shape", rawResult: result };
-}
-
 async function executeNativeControlCommand(command = {}) {
   const type = String(command.type || "");
   const payload = command && typeof command.payload === "object" ? command.payload : {};
@@ -5733,6 +5588,11 @@ async function executeNativeControlCommand(command = {}) {
     reason: command.reason || payload.reason || "",
   });
   try {
+  const nativeWindows = await windowsNativeCommands.execute(type, payload, command.id || "");
+  if (nativeWindows.handled) {
+    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result: nativeWindows.result });
+    return nativeWindows.result;
+  }
   if (type === "windows_shell_execute_unrestricted") {
     const result = await fullPowerExecutor.execute(payload, command.id || "");
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
@@ -5821,28 +5681,20 @@ async function executeNativeControlCommand(command = {}) {
   }
   if (type === "get_native_kernel_status") {
     await ensureDownloadedRuntimeFromFeed(payload);
-    await ensureDownloadedHotOperationsFromFeed(payload);
-    const result = { ok: true, operation: type, kernel: nativeKernelStatus(), logsTail: recentBridgeLogsTail() };
+    const result = createKernelStatus(nativeKernelStatus(), recentBridgeLogsTail(), payload);
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
   if (type === "get_bridge_status" || type === "status") {
     await ensureDownloadedRuntimeFromFeed(payload);
     await ensureDownloadedHotOperationsFromFeed(payload);
-    const result = getBridgeStatus();
-    writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
-    return result;
-  }
-  if (type === "list_hot_operations") {
-    await ensureDownloadedRuntimeFromFeed(payload);
-    await ensureDownloadedHotOperationsFromFeed(payload);
-    const result = listHotOperations();
+    const result = getBridgeStatus(payload);
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
   if (type === "refresh_downloaded_runtime" || type === "sync_downloaded_runtime") {
     const downloadedRuntimeSync = await ensureDownloadedRuntimeFromFeed({ ...payload, forceSync: true });
-    const result = { ok: downloadedRuntimeSync.ok === true, operation: type, downloadedRuntimeSync, downloadedRuntime: downloadedRuntimeSummary(), logsTail: recentBridgeLogsTail() };
+    const result = createRuntimeSyncStatus(type, downloadedRuntimeSync, downloadedRuntimeSummary(), recentBridgeLogsTail(), payload);
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
@@ -5851,9 +5703,9 @@ async function executeNativeControlCommand(command = {}) {
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
-  if (type === "refresh_downloaded_hot_ops" || type === "sync_downloaded_hot_ops") {
-    const downloadedHotOpsSync = await ensureDownloadedHotOperationsFromFeed({ ...payload, forceSync: true });
-    const result = { ok: downloadedHotOpsSync.ok === true, operation: type, downloadedHotOpsSync, logsTail: recentBridgeLogsTail() };
+  const hotOpsControl = hotOpsSyncControl.handle(type, payload);
+  if (hotOpsControl.handled) {
+    const result = hotOpsControl.result;
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
   }
@@ -5945,6 +5797,7 @@ async function executeNativeControlCommand(command = {}) {
       ...payload,
       reason: command.reason || payload.reason || `control:${command.id || type}`,
       applyApproved: payload.applyApproved === true || payload.apply_approved === true,
+      automatic: payload.automatic === true || payload.applyApproved === true || payload.apply_approved === true,
     });
     writeNativeControlAudit({ action: "command_finished", id: command.id || "", type, result });
     return result;
@@ -5970,7 +5823,7 @@ async function executeNativeControlCommand(command = {}) {
     return result;
   }
   if (type === "clear_web_cache" || type === "clear_cache") {
-    const clearResult = await clearNativeWebShellCache();
+    const clearResult = await clearWebShellCache(session.defaultSession, logNativeDiagnostic);
     const reloadResult = await controlledNativeReload(win, {
       mode: "clear_cache",
       reason: command.reason || payload.reason || "",
@@ -6121,8 +5974,10 @@ async function pollNativeControl(reason = "interval") {
         result = nativeControlConstantSelfTestResult();
         writeNativeControlAudit({ action: "self_test_result_built", id: command?.id || "", type: command?.type || "", result });
         try {
+          dispatcherHealth.markUploading(command);
           writeNativeControlAudit({ action: "self_test_upload_start", id: command?.id || "", type: command?.type || "" });
           upload = await postNativeControlResult(command, result);
+          dispatcherHealth.markFinished(command, upload);
           writeNativeControlAudit({ action: "self_test_upload_done", id: command?.id || "", type: command?.type || "", upload });
           writeNativeControlAudit({ action: "command_result_upload_finished", id: command?.id || "", type: command?.type || "", upload });
         } catch (error) {
@@ -6133,11 +5988,13 @@ async function pollNativeControl(reason = "interval") {
         continue;
       }
       try {
-        result = await executeNativeControlCommandWithWatchdog(command);
+        result = await dispatcherHealth.execute(command, executeNativeControlCommand);
       } catch (error) {
         result = { ok: false, error: String(error && error.message ? error.message : error), failureClassification: "handler_threw" };
       } finally {
+        dispatcherHealth.markUploading(command);
         upload = await postNativeControlResult(command, result);
+        dispatcherHealth.markFinished(command, upload);
         writeNativeControlAudit({ action: "command_result_upload_finished", id: command.id || "", type: command.type || "", upload });
       }
     }
@@ -6227,7 +6084,7 @@ function loadConfiguredServer(win) {
     console.log(`[native] final loaded URL: ${startUrl || fallbackPagePath()}`);
     if (serverUrl) {
       void ensureDownloadedRuntimeFromFeed({ launch: true, forceSync: true })
-        .then((downloadedRuntimeSync) => postNativeEvent("native.runtime_sync", { downloadedRuntimeSync, downloadedRuntime: downloadedRuntimeSummary(), kernel: nativeKernelStatus() }))
+        .then((downloadedRuntimeSync) => postNativeEvent("native.runtime_sync", createRuntimeSyncStatus("native.runtime_sync", downloadedRuntimeSync, downloadedRuntimeSummary())))
         .catch((error) => logNativeDiagnostic("downloaded-runtime-sync-failed", { reason: String(error && error.message ? error.message : error) }));
       void ensureDownloadedHotOperationsFromFeed({ launch: true, forceSync: true })
         .then((downloadedHotOpsSync) => postNativeEvent("native.hot_ops_sync", { downloadedHotOpsSync, hotOperations: hotOperationsSummary(), kernel: nativeKernelStatus() }))
@@ -6281,7 +6138,7 @@ async function controlledNativeReload(win, options = {}) {
   const mode = String(options.mode || (options.hard ? "reload_ignore_cache" : "reload"));
   const beforeRoute = currentRendererUrl();
   const startedAt = new Date().toISOString();
-  if (options.clearCache) await clearNativeWebShellCache();
+  if (options.clearCache) await clearWebShellCache(session.defaultSession, logNativeDiagnostic);
   let targetUrl = "";
   try {
     if (options.cacheBust) {
@@ -6333,23 +6190,6 @@ async function controlledNativeReload(win, options = {}) {
   }
 }
 
-async function clearNativeWebShellCache() {
-  try {
-    await session.defaultSession.clearCache();
-    await session.defaultSession.clearStorageData({
-      storages: ["serviceworkers", "cachestorage", "localstorage"],
-    });
-    logNativeDiagnostic("web-cache-cleared", {
-      storages: ["http", "serviceworkers", "cachestorage", "localstorage"],
-    });
-    return { ok: true, storages: ["http", "serviceworkers", "cachestorage", "localstorage"] };
-  } catch (error) {
-    const reason = String(error && error.message ? error.message : error);
-    logNativeDiagnostic("web-cache-clear-failed", { reason });
-    return { ok: false, error: reason };
-  }
-}
-
 function createWindow() {
   const config = ensureConfig();
   const icon = nativeIconPath();
@@ -6371,6 +6211,7 @@ function createWindow() {
     height: 860,
     minWidth: 960,
     minHeight: 640,
+    show: companionOverlay == null,
     title: "WASM Agent",
     backgroundColor: "#090d12",
     autoHideMenuBar: true,
@@ -6611,8 +6452,11 @@ ipcMain.handle("wasm-agent:install-staged-update", (event) => {
 
 app.whenReady().then(async () => {
   registerNativeAppProtocol();
-  await clearNativeWebShellCache();
-  createWindow();
+  await clearWebShellCache(session.defaultSession, logNativeDiagnostic);
+  companionOverlay = createCompanionOverlay({ BrowserWindow, globalShortcut, ipcMain, screen, session, shell, preload: path.join(__dirname, "preload.js"), icon: nativeIconPath(), origin: () => selectedBackendOrigin || ensureConfig().serverUrl || DEFAULT_SERVER_URL, statePath: path.join(nativeAppDataDir(), "companion-window.json"), onStatus: (value) => writeNativeControlAudit({ action: "companion_overlay_status", result: value }) });
+  companionOverlay.register();
+  companionStartup = createCompanionStartup({ createSetupWindow: createWindow, companion: companionOverlay, authSessionStatus: nativeAuthSessionStatus, onStatus: (value) => writeNativeControlAudit({ action: "companion_startup_status", result: value }) });
+  void companionStartup.start();
   void postNativeEvent("native.install_status", { status: "launched", app_version: app.getVersion() });
   const hotOpsStatus = hotOperationsSummary();
   const runtimeStatus = downloadedRuntimeSummary();
@@ -6645,15 +6489,20 @@ app.whenReady().then(async () => {
 	    nativeKernel: kernelStatus,
 	    hotOperations: hotOpsStatus,
 	  });
-  void postNativeEvent("device.status", { status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, downloadedRuntimeProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION, nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES, downloadedRuntime: runtimeStatus, nativeKernel: kernelStatus, activeDownloadedRuntimeId: kernelStatus.activeDownloadedRuntimeId, activeDownloadedRuntimeSha: kernelStatus.activeDownloadedRuntimeSha, activeHotOpBundleId: kernelStatus.activeHotOpBundleId, activeHotOpSha: kernelStatus.activeHotOpSha, syncStatus: kernelStatus.syncStatus, staleReason: kernelStatus.staleReason, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...hotOpsStatus }, logsTail: recentBridgeLogsTail() });
+  void postNativeEvent("device.status", compactHeartbeat({ status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, downloadedRuntimeProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION, nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES, downloadedRuntime: runtimeStatus, nativeKernel: kernelStatus, activeDownloadedRuntimeId: kernelStatus.activeDownloadedRuntimeId, activeDownloadedRuntimeSha: kernelStatus.activeDownloadedRuntimeSha, activeHotOpBundleId: kernelStatus.activeHotOpBundleId, activeHotOpSha: kernelStatus.activeHotOpSha, syncStatus: kernelStatus.syncStatus, staleReason: kernelStatus.staleReason, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...hotOpsStatus }, logCount: bridgeLogsTail.length }));
   startNativeControlPolling();
   setInterval(() => {
     void ensureDownloadedRuntimeFromFeed({ heartbeat: true });
     const heartbeatHotOps = hotOperationsSummary();
     const heartbeatKernel = nativeKernelStatus();
-    void postNativeEvent("device.heartbeat", { status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, downloadedRuntimeProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION, nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES, downloadedRuntime: heartbeatKernel.downloadedRuntime, nativeKernel: heartbeatKernel, activeDownloadedRuntimeId: heartbeatKernel.activeDownloadedRuntimeId, activeDownloadedRuntimeSha: heartbeatKernel.activeDownloadedRuntimeSha, activeHotOpBundleId: heartbeatKernel.activeHotOpBundleId, activeHotOpSha: heartbeatKernel.activeHotOpSha, syncStatus: heartbeatKernel.syncStatus, staleReason: heartbeatKernel.staleReason, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...heartbeatHotOps }, hotOpsMode: heartbeatHotOps.hotOpsMode, hotOpsRoot: heartbeatHotOps.hotOpsRoot, devReload: heartbeatHotOps.devReload, logsTail: recentBridgeLogsTail() });
+    void postNativeEvent("device.heartbeat", compactHeartbeat({ status: "online", app_version: app.getVersion(), arch: os.arch(), build_id: currentWindowsBuildInfo().buildId, shellProtocolVersion: SHELL_PROTOCOL_VERSION, hotOpsProtocolVersion: HOT_OPERATION_PROTOCOL_VERSION, downloadedRuntimeProtocolVersion: DOWNLOADED_RUNTIME_PROTOCOL_VERSION, nativeKernelVersion: NATIVE_KERNEL_CONTRACT_VERSION, minimumRunnerVersion: MINIMUM_RUNNER_VERSION, capabilities: BRIDGE_PROTOCOL_CAPABILITIES, supportedCapabilities: WINDOWS_NATIVE_KERNEL_CAPABILITIES, downloadedRuntime: heartbeatKernel.downloadedRuntime, nativeKernel: heartbeatKernel, activeDownloadedRuntimeId: heartbeatKernel.activeDownloadedRuntimeId, activeDownloadedRuntimeSha: heartbeatKernel.activeDownloadedRuntimeSha, activeHotOpBundleId: heartbeatKernel.activeHotOpBundleId, activeHotOpSha: heartbeatKernel.activeHotOpSha, syncStatus: heartbeatKernel.syncStatus, staleReason: heartbeatKernel.staleReason, hotOperations: { supported: true, protocol: HOT_OPERATION_PROTOCOL_VERSION, ...heartbeatHotOps }, hotOpsMode: heartbeatHotOps.hotOpsMode, hotOpsRoot: heartbeatHotOps.hotOpsRoot, devReload: heartbeatHotOps.devReload, logCount: bridgeLogsTail.length }));
   }, HEARTBEAT_INTERVAL_MS).unref();
   app.on("activate", () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow();
+    void companionStartup?.sync("app-activate");
   });
+});
+
+app.on("before-quit", () => {
+  companionStartup?.dispose();
+  companionOverlay?.dispose();
 });

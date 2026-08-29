@@ -1,4 +1,33 @@
 const number = (value) => Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : null;
+const REASONING_STORAGE_KEY = "wasmAgent.masterFrontierReasoningEffort";
+const REASONING_EFFORTS = Object.freeze([
+  ["none", "None"], ["low", "Light"], ["medium", "Medium"],
+  ["high", "High"], ["xhigh", "XHigh"], ["max", "Max"],
+]);
+const REASONING_VALUES = new Set(REASONING_EFFORTS.map(([value]) => value));
+
+export function normalizeMasterFrontierReasoningEffort(value) {
+  const normalized = String(value || "").trim().toLowerCase();
+  return REASONING_VALUES.has(normalized) ? normalized : "low";
+}
+
+export function masterFrontierReasoningEffort(storage = globalThis.localStorage) {
+  try {
+    return normalizeMasterFrontierReasoningEffort(storage?.getItem(REASONING_STORAGE_KEY));
+  } catch {
+    return "low";
+  }
+}
+
+export function setMasterFrontierReasoningEffort(value, storage = globalThis.localStorage) {
+  const normalized = normalizeMasterFrontierReasoningEffort(value);
+  try { storage?.setItem(REASONING_STORAGE_KEY, normalized); } catch { /* storage is optional */ }
+  return normalized;
+}
+
+export function masterFrontierRequestPreferences(storage = globalThis.localStorage) {
+  return { reasoning_effort: masterFrontierReasoningEffort(storage), text_verbosity: "low" };
+}
 
 const firstNumber = (source, keys) => {
   for (const key of keys) {
@@ -39,7 +68,7 @@ const latestContextTokens = (diagnostics = {}) => {
 
 const percentageLeft = (used, total) => total > 0 ? Math.max(0, Math.min(100, Math.round((1 - used / total) * 100))) : null;
 
-export function masterFrontierStatusModel({ sessionId = "", diagnostics = {}, sessionSummary = {} } = {}) {
+export function masterFrontierStatusModel({ sessionId = "", diagnostics = {}, sessionSummary = {}, reasoningEffort = "low" } = {}) {
   const calls = Array.isArray(diagnostics.token_usage) ? diagnostics.token_usage : [];
   const latestCall = calls.at(-1) || {};
   const telemetry = diagnostics.status_telemetry
@@ -71,6 +100,10 @@ export function masterFrontierStatusModel({ sessionId = "", diagnostics = {}, se
   return {
     sessionId: String(sessionId || diagnostics.session_id || "-") ,
     modelName: modelName || "not reported",
+    reasoningEffort: normalizeMasterFrontierReasoningEffort(reasoningEffort),
+    effectiveReasoningEffort: normalizeMasterFrontierReasoningEffort(
+      diagnostics.reasoning_effort || diagnostics.reasoningEffort || reasoningEffort,
+    ),
     contextUsed,
     contextWindow,
     contextLeft: contextUsed !== null && contextWindow !== null ? percentageLeft(contextUsed, contextWindow) : null,
@@ -137,7 +170,8 @@ const element = (document, name, className, text = "") => {
 export function renderMasterFrontierStatusPanel(root, input = {}) {
   if (!root) return null;
   const document = root.ownerDocument;
-  const model = masterFrontierStatusModel(input);
+  const selectedReasoning = masterFrontierReasoningEffort(input.storage);
+  const model = masterFrontierStatusModel({ ...input, reasoningEffort: selectedReasoning });
   const header = element(document, "header", "codex-status__header");
   header.append(element(document, "strong", "", "Status"));
   const close = element(document, "button", "codex-status__close", "Close");
@@ -160,6 +194,20 @@ export function renderMasterFrontierStatusPanel(root, input = {}) {
   };
   body.append(row("Session:", model.sessionId));
   body.append(row("Model:", model.modelName));
+  const reasoningSelect = element(document, "s-select", "codex-status__reasoning");
+  reasoningSelect.setAttribute("aria-label", "Thinking weight");
+  reasoningSelect.dataset.effectiveReasoningEffort = model.effectiveReasoningEffort;
+  for (const [value, label] of REASONING_EFFORTS) {
+    const option = element(document, "option", "", label);
+    option.value = value;
+    option.selected = value === model.reasoningEffort;
+    reasoningSelect.append(option);
+  }
+  reasoningSelect.value = model.reasoningEffort;
+  reasoningSelect.addEventListener("change", () => {
+    setMasterFrontierReasoningEffort(reasoningSelect.value, input.storage);
+  });
+  body.append(row("Thinking:", "", reasoningSelect));
   const contextText = model.contextWindow === null || model.contextUsed === null
     ? `${compact(model.contextUsed)} used / window not reported`
     : `${model.contextLeft}% left (${model.contextUsed.toLocaleString()} used / ${compact(model.contextWindow)})`;

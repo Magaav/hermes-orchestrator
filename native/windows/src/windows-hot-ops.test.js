@@ -5,6 +5,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const mainJs = fs.readFileSync(path.join(__dirname, "main.js"), "utf8");
+const dispatcherHealthJs = fs.readFileSync(path.join(__dirname, "main", "dispatcher-health.js"), "utf8");
+const { ALL_NATIVE_KERNEL_CAPABILITIES } = require("./main/native-capabilities");
 const audioJs = fs.readFileSync(path.join(__dirname, "main", "audio-stimulus.js"), "utf8");
 const hermesOp = require(path.join(__dirname, "..", "ops", "android", "hermes-wake-proof.js"));
 
@@ -19,12 +21,12 @@ assert(mainJs.includes('"refresh_downloaded_runtime"'), "refresh_downloaded_runt
 assert(mainJs.includes('"sync_downloaded_runtime"'), "sync_downloaded_runtime must be allowlisted");
 assert(mainJs.includes('"rollback_downloaded_runtime"'), "rollback_downloaded_runtime must be allowlisted");
 assert(mainJs.includes('"run_shell_self_test"'), "run_shell_self_test must be allowlisted");
-assert(mainJs.includes("NATIVE_CONTROL_DEFAULT_TIMEOUT_MS"), "native-control commands must have an executor watchdog");
-assert(mainJs.includes("executeNativeControlCommandWithWatchdog"), "native-control polling must call handlers through the watchdog");
-assert(mainJs.includes('"handler_timeout"'), "native-control watchdog must produce handler_timeout");
-assert(mainJs.includes('action: "command_timeout"'), "native-control watchdog must audit timeout results");
+assert(dispatcherHealthJs.includes("DEFAULT_TIMEOUT_MS"), "native-control commands must have an executor watchdog");
+assert(mainJs.includes("dispatcherHealth.execute(command, executeNativeControlCommand)"), "native-control polling must call handlers through the owned watchdog");
+assert(dispatcherHealthJs.includes('"handler_timeout"'), "native-control watchdog must produce handler_timeout");
+assert(dispatcherHealthJs.includes('action: "command_timeout"'), "native-control watchdog must audit timeout results");
 assert(mainJs.includes('action: "command_result_upload_finished"'), "native-control results must upload from a finally path");
-assert(mainJs.includes("finally {\n        upload = await postNativeControlResult(command, result);"), "native-control result upload must run in finally");
+assert(mainJs.includes("finally {\n        dispatcherHealth.markUploading(command);\n        upload = await postNativeControlResult(command, result);"), "native-control result upload must run in a leased finally path");
 assert(mainJs.includes("function normalizeHotOperationModulePath"), "hot op path normalizer must exist");
 assert(mainJs.includes("function scanHotOperationManifests"), "hot op manifest scanner must exist");
 assert(mainJs.includes("function listHotOperations"), "list_hot_operations implementation must exist");
@@ -71,7 +73,7 @@ assert(mainJs.includes("downloadedRuntimeFileMismatch"), "downloaded runtime syn
 assert(mainJs.includes("releaseUrlAllowedForDownloadedRuntime"), "downloaded runtime URLs must be allowlisted");
 assert(mainJs.includes('"/native/releases/runtime/"'), "downloaded runtime must be restricted to the runtime release path");
 assert(mainJs.includes('path.join(appData, "WASM-Agent", "runtime")'), "downloaded runtime cache must live under app data runtime root");
-assert(mainJs.includes('native.capabilities.downloadedRuntime.v1'), "downloaded runtime capability must be advertised");
+assert(ALL_NATIVE_KERNEL_CAPABILITIES.includes("native.capabilities.downloadedRuntime.v1"), "downloaded runtime capability must be advertised");
 assert(mainJs.includes("WASM_AGENT_ENABLE_VERBOSE_BRIDGE_LOGS"), "verbose bridge log flag must be supported");
 assert(mainJs.includes('path.join(appData, "WASM-Agent", "bridge-ops")'), "user ops root must be supported");
 assert(mainJs.includes('resourcePath("bridge-ops")'), "bundled fallback root must be supported");
@@ -97,7 +99,7 @@ assert(audioJs.includes("windows_fixed_audio_stimulus"), "Windows audio stimulus
 assert(audioJs.includes("[Console]::Beep(${frequencyHz}, ${durationMs});"), "Windows beep stimulus must embed bounded numeric arguments");
 assert(audioJs.includes('"voice_inventory"'), "Windows audio stimulus must expose bounded installed-voice inventory");
 assert(audioJs.includes("$synth.SelectVoice($selected.Name)"), "Windows audio stimulus must select an exact installed voice");
-assert(mainJs.includes("native.capabilities.speaker.v1"), "Windows speaker primitive must be advertised as a native capability");
+assert(ALL_NATIVE_KERNEL_CAPABILITIES.includes("native.capabilities.speaker.v1"), "speaker primitive must remain in the native capability vocabulary");
 
 const deniedIndex = mainJs.indexOf("function requireHotOperationCapability");
 const helperIndex = mainJs.indexOf("function createHotOperationContext");

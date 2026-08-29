@@ -54,8 +54,14 @@ See more: [`../../docs/commands/horc.md`](../../docs/commands/horc.md)
 
 ```bash
 cp /local/scripts/private/backup/backup_nodes_to_gdrive.env.example \
-   /local/scripts/private/backup/backup_nodes_to_gdrive.env
+  /local/scripts/private/backup/backup_nodes_to_gdrive.env
 ```
+
+Host disk exhaustion is guarded by the tracked units in
+`tools/context/systemd/wasm-agent-disk-health.{service,timer}`. The timer runs
+the bounded context guard every minute; inspect current state with
+`systemctl status wasm-agent-disk-health.timer` and
+`python3 tools/context/check-disk-health.py`.
 
 ## See Also
 

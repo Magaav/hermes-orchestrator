@@ -71,27 +71,6 @@ JOURNEYS = (
         required_metrics=ACTION_METRICS,
     ),
     JourneySpec(
-        journey_id="electron-browser-agent",
-        owner="plugins/wasm-agent; native/windows",
-        claim="Authenticated V6 selects an authorized live Electron renderer, opens Browser, receives acknowledgement, and verifies the command receipt.",
-        verification_level="production-runtime",
-        evidence=(
-            EvidenceSpec(
-                "production-native-control-authority",
-                "reports/context/latest/production-native-control-authority.json",
-            ),
-            EvidenceSpec(
-                "master-frontier-v6-production-client-ui",
-                "reports/context/latest/master-frontier-v6-client-ui.json",
-            ),
-        ),
-        run_promises=(
-            "production-native-control-authority",
-            "master-frontier-v6-production-client-ui",
-        ),
-        required_metrics=ACTION_METRICS + ("stageLatenciesMs", "clientAcknowledged", "commandReceiptVerified"),
-    ),
-    JourneySpec(
         journey_id="android-voice-agent",
         owner="plugins/wasm-agent; native/android; native/windows",
         claim="One Alexa stimulus wakes exactly once, gives immediate avatar feedback, captures and routes speech, and acknowledges the resulting action.",
@@ -456,8 +435,6 @@ def journey_result(spec: JourneySpec, promises: dict[str, dict[str, Any]]) -> di
         item.pop("_payload", None)
     if spec.journey_id == "repository-agent":
         metrics = repository_metrics(primary_payload)
-    elif spec.journey_id == "electron-browser-agent":
-        metrics = electron_metrics(primary_payload)
     else:
         metrics = android_metrics(primary_payload)
     status = combine_status(normalized)
@@ -727,9 +704,7 @@ def validate_contract() -> list[str]:
         return [f"schema read failed: {error}"]
     if schema.get("$id") != SCHEMA_ID:
         errors.append(f"schema $id must be {SCHEMA_ID}")
-    if [item.journey_id for item in JOURNEYS] != [
-        "repository-agent", "electron-browser-agent", "android-voice-agent",
-    ]:
+    if [item.journey_id for item in JOURNEYS] != ["repository-agent", "android-voice-agent"]:
         errors.append("journey ids are not the canonical ordered set")
     _, promises = registry()
     for journey in JOURNEYS:

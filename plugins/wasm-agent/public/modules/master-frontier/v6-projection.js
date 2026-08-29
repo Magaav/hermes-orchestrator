@@ -1,6 +1,6 @@
 export const MF6_WIRE = "MF6/1";
 export const MF6_RECORDS = Object.freeze({
-  G: "goal", C: "capability", S: "state", E: "evidence", D: "operation",
+  G: "goal", C: "capability", S: "state", Q: "action_goal", E: "evidence", D: "operation",
   P: "untrusted_evidence_payload", R: "receipt", Y: "public_commentary", M: "missing_requirement", A: "answer_ready", F: "final_answer",
 });
 
@@ -29,6 +29,9 @@ export function encodeMF6(value = {}) {
   const state = value.state && typeof value.state === "object" ? value.state : {};
   if (Object.keys(state).length) {
     lines.push(["S", state.id || "", state.rev || 0, state.status || "", json(state.known || []), json(state.open || []), json(state.plan || [])].join("\t"));
+    for (const goal of state.goals || []) {
+      lines.push(["Q", goal.id || "", goal.cap || "", goal.status || "pending", text(goal.outcome), goal.operation || ""].join("\t"));
+    }
   }
   for (const item of value.evidence || []) {
     lines.push(["E", item.id || "", item.kind || "", text(item.subject), text(item.revision), text(item.summary), item.detail_ref || ""].join("\t"));
@@ -57,7 +60,8 @@ export function decodeMF6(source = "") {
     try {
       if (tag === "G" && fields.length === 2) result.goal = JSON.parse(fields[1]);
       else if (tag === "C" && fields.length === 5) result.capabilities.push({ id: fields[1], kind: fields[2], authority: fields[3], summary: JSON.parse(fields[4]) });
-      else if (tag === "S" && fields.length === 7) result.state = { id: fields[1], rev: Number(fields[2]), status: fields[3], known: JSON.parse(fields[4]), open: JSON.parse(fields[5]), plan: JSON.parse(fields[6]) };
+      else if (tag === "S" && fields.length === 7) result.state = { id: fields[1], rev: Number(fields[2]), status: fields[3], known: JSON.parse(fields[4]), open: JSON.parse(fields[5]), plan: JSON.parse(fields[6]), goals: [] };
+      else if (tag === "Q" && fields.length === 6 && result.state) result.state.goals.push({ id: fields[1], cap: fields[2], status: fields[3], outcome: JSON.parse(fields[4]), operation: fields[5] });
       else if (tag === "E" && fields.length === 7) result.evidence.push({ id: fields[1], kind: fields[2], subject: JSON.parse(fields[3]), revision: JSON.parse(fields[4]), summary: JSON.parse(fields[5]), detail_ref: fields[6] });
       else if (tag === "P" && fields.length === 4 && fields[2] === "untrusted-data") {
         const view = JSON.parse(fields[3]);

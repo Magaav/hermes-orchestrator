@@ -1,0 +1,107 @@
+{
+  "capability_ok": true,
+  "capability_used": true,
+  "changed_files": [],
+  "duration_ms": 7861,
+  "expected_capability": "client.windows.desktop.windows.list",
+  "expected_proof": "windows.desktop.top_level_windows",
+  "fixture": "windows-list",
+  "label": "procedure-live-2",
+  "ok": true,
+  "performance": {
+    "checkpoint": {
+      "count": 2,
+      "duration_ms": 35
+    },
+    "phases": {
+      "host_after_last_provider_ms": 1963,
+      "host_before_first_provider_ms": 72,
+      "host_between_providers_ms": 0,
+      "ingress_to_v6_ms": 0,
+      "provider_ms": 5731
+    },
+    "projection": {
+      "body_bytes": 10110,
+      "calls": 1,
+      "message_content_bytes": 5981,
+      "messages_bytes": 6164,
+      "tools_bytes": 2655
+    },
+    "provider_calls": [
+      {
+        "decision": 1,
+        "duration_ms": 5731,
+        "ok": true,
+        "projection": {
+          "body_bytes": 10110,
+          "message_content_bytes": 5981,
+          "messages_bytes": 6164,
+          "tools_bytes": 2655
+        }
+      }
+    ],
+    "schema": "master.frontier.v6.performance.v1",
+    "total_ms": 7766,
+    "v6_internal_ms": 7766
+  },
+  "procedure_memory": {
+    "capability": "client.windows.desktop.windows.list",
+    "objective_sha256": "7eb7b41e6dabe314122fe753558ae7f235fe1448e0220fe28e320e5b3ee6ca6c",
+    "schema": "master.frontier.v6.procedure-memory.v1",
+    "state": "promoted",
+    "successes": 2
+  },
+  "proof_verified": true,
+  "provider_calls": 1,
+  "reply": "12 visible top-level Windows windows: WASM Agent (WASM Agent); colmeio-logo-raw-mask-degrade.svg - colmeio [WSL: Ubuntu] - Visual Studio Code (Code); logo.png - local [SSH: openclaw.ohana] - Visual Studio Code (Code); deck-of-cards/deck-of-cards: Deck of Cards (old version) - Google Chrome (chrome); localhost - Google Chrome (chrome); WhatsApp Web (chrome); WASM Agent (WindowsTerminal); Agent Browser Tunnel (WindowsTerminal); Administrator: Agent Browser for WSL (cmd); Back (TextInputHost); about:blank - Google Chrome (chrome); Program Manager (explorer)",
+  "run_id": "wa_run_6d6c5db98abe426db26b9865e1c57005",
+  "schema": "mf-v7.pilot.live-fixture.v1",
+  "session_id": "mf6-procedure-live-2",
+  "token_usage": {
+    "calls": 1,
+    "context_window_tokens": 258400,
+    "exact": true,
+    "metered_calls": 1,
+    "model": "gpt-5.6-luna",
+    "provider_compaction_generation": 0,
+    "provider_compaction_status": "none",
+    "provider_thread_fork_reason": "",
+    "provider_thread_id": "01a0448f-e591-73f2-b88b-36cac5a9eb8a",
+    "provider_thread_resumed": false,
+    "provider_thread_turn": 1,
+    "rate_limits": {
+      "seven_day": {
+        "percent_left": 93,
+        "percent_used": 7,
+        "resets_at": 1788452773,
+        "window_duration_minutes": 10080
+      }
+    },
+    "stable_context_mode": "thread_continuation",
+    "stable_context_reused": false,
+    "status_telemetry": {
+      "captured_at": 1787856681,
+      "context_window": {
+        "source": "codex_app_server.token_usage",
+        "status": "reported",
+        "tokens": 258400
+      },
+      "model": {
+        "source": "resolved_request",
+        "status": "reported",
+        "value": "gpt-5.6-luna"
+      },
+      "schema": "hermes.wasm_agent.provider_status.v1",
+      "seven_day": {
+        "percent_left": 93,
+        "percent_used": 7,
+        "resets_at": 1788452773,
+        "source": "codex_app_server.account_rate_limits",
+        "status": "reported",
+        "window_duration_minutes": 10080
+      }
+    },
+    "total_tokens": 11712
+  },
+  "user_id_hash": "9633b2c7acf90741"
+}

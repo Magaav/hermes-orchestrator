@@ -1,0 +1,17 @@
+{
+  "schema": "hermes.wasm_agent.native_evolution_routes.v1",
+  "priority": ["native-rebuild", "hot-bundle", "cloud-module", "no-build"],
+  "routes": [
+    {"prefix": "native/windows/archive/", "lane": "no-build", "targets": ["windows"]},
+    {"prefix": "native/windows/README.md", "lane": "no-build", "targets": ["windows"]},
+    {"prefix": "native/windows/AGENTS.md", "lane": "no-build", "targets": ["windows"]},
+    {"prefix": "native/windows/ops/", "lane": "hot-bundle", "targets": ["windows"], "requiredCapabilities": ["native.capabilities.hotOps.v1", "native.capabilities.downloadedOperations.v1"]},
+    {"prefix": "native/windows/src/", "lane": "native-rebuild", "targets": ["windows"]},
+    {"prefix": "native/windows/scripts/", "lane": "native-rebuild", "targets": ["windows"]},
+    {"prefix": "native/windows/", "lane": "native-rebuild", "targets": ["windows"]},
+    {"prefix": "native/android/", "lane": "native-rebuild", "targets": ["android"]},
+    {"prefix": "plugins/wasm-agent/native-runtime/", "lane": "hot-bundle", "targets": ["windows", "android"], "requiredCapabilities": ["native.capabilities.runtimeLoader.v1", "native.capabilities.downloadedRuntime.v1"]},
+    {"prefix": "plugins/wasm-agent/public/", "lane": "cloud-module", "targets": ["windows", "android"]},
+    {"prefix": "plugins/wasm-agent/server/", "lane": "cloud-module", "targets": ["windows", "android"]}
+  ]
+}

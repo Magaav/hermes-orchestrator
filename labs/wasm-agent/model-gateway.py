@@ -37,6 +37,14 @@ PROVIDER_CALLS = 0
 LANE_ID = re.compile(r"^harness-[0-9]{2}$")
 
 
+def expected_model_identity(returned: str) -> bool:
+    """Accept only the gateway's declared qualified identity or request alias."""
+    return returned.casefold().strip() in {
+        MODEL_EXPECTED.casefold(),
+        MODEL_REQUEST.casefold(),
+    }
+
+
 def broker_identity(headers: http.client.HTTPMessage) -> str:
     presented = ""
     authorization = headers.get("Authorization") or ""
@@ -339,8 +347,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         except (urllib.error.URLError, TimeoutError, ValueError):
             status = 502
             response_payload = {"error": "upstream_unavailable"}
-        returned_model = str(inspected.get("returnedModel") or response_payload.get("model") or "")
-        contract_match = status == 200 and returned_model == MODEL_EXPECTED
+        returned_model_raw = str(inspected.get("returnedModel") or response_payload.get("model") or "")
+        contract_match = status == 200 and expected_model_identity(returned_model_raw)
+        returned_model = MODEL_EXPECTED if contract_match else returned_model_raw
         forwarded_status = status
         forwarded_payload = response_payload
         if status == 200 and not contract_match:
@@ -353,6 +362,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "requestSha256": request_sha256,
             "requestModel": MODEL_REQUEST,
             "returnedModel": returned_model,
+            "returnedModelRaw": returned_model_raw,
             "status": status,
             "contractMatch": contract_match,
             "duplicateOrdinal": duplicate_ordinal,

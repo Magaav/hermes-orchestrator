@@ -9,12 +9,17 @@
       "browser_entry_url": "https://wa.colmeio.com/",
       "client_ui": {
         "runtime_types": ["electron", "pwa", "android-kotlin"],
-        "widget_ids": ["browser"],
-        "operations": ["inspect", "browser_inspect", "open_widget", "space_open", "browser_navigate", "browser_input_receipt", "browser_pointer_dispatch", "browser_javascript_execute_unrestricted", "windows_shell_execute_unrestricted", "command_status"]
+        "widget_ids": [],
+        "operations": ["inspect", "space_catalog", "runtime_diagnose", "runtime_refresh", "open_widget", "space_open", "windows_shell_execute_unrestricted", "show_companion_overlay", "run_notepad_uia_canary", "windows_browser_cdp_status", "windows_browser_cdp_persistent_open", "windows_browser_cdp_incognito_open", "windows_browser_cdp_navigate", "windows_browser_cdp_inspect", "windows_browser_cdp_runtime_inspect", "windows_browser_cdp_act", "windows_browser_cdp_procedure", "windows_desktop_windows_list", "windows_desktop_screenshot", "windows_desktop_describe", "windows_desktop_inspect", "windows_desktop_act", "windows_desktop_prove", "command_status"]
       },
-      "allowed_read_roots": ["."],
+      "allowed_read_roots": [".", "../../docs/context", "../../reports/context/latest"],
       "allowed_write_roots": ["."],
       "allowed_edit_operations": ["create", "replace", "append"],
+      "implementation_invariants": [
+        "Current-system recommendations must compare the proposed improvement with existing registered capabilities and promises before presenting it as missing.",
+        "Current readiness or priority recommendations must inspect the latest highestPriorityBottleneck evidence and distinguish an existing mechanism from its remaining automation or proof gap.",
+        "Do not recommend adding, creating, or implementing a capability, promise, check, or proof mechanism unless repository evidence establishes that it is absent; otherwise name the existing mechanism and recommend only its evidenced remaining gap."
+      ],
       "likely_paths": [
         "server/master_frontier/planner.py",
         "server/master_frontier/authority.py",
@@ -84,7 +89,7 @@
         "missing_route": "fail"
       },
       "source_index": {
-        "include_roots": ["server", "public", "tests", "../../docs/context", "../../tools/context"],
+        "include_roots": ["server", "public", "tests", "../../docs/context", "../../reports/context/latest", "../../tools/context"],
         "exclude_globs": [
           "public/modules/**/onnx/**",
           "public/modules/**/*.wasm",
@@ -93,8 +98,6 @@
           "public/modules/**/merges.txt",
           "tools/vendor/**",
           "../../tools/vendor/**",
-          "reports/**",
-          "../../reports/**",
           "state/**",
           "../../state/**",
           "**/node_modules/**",
@@ -113,7 +116,7 @@
       "budget": {
         "head_tokens_max": 3000,
         "provider_tokens_max": 20000,
-        "api_calls_max": 6,
+        "api_calls_max": 8,
         "wall_ms_max": 90000,
         "provider_call_ms_max": 90000,
         "heartbeat_ms_max": 15000,

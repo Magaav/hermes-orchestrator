@@ -5,24 +5,25 @@ import { defaultAgentSelectionTarget, isMasterFrontierTarget, masterFrontierNode
 import { MASTER_FRONTIER_CAPS, MASTER_FRONTIER_OUTPUT_SCHEMA, masterFrontierAllowedActions } from "./modules/master-frontier/protocol.js";
 import { createAgentSessionRow } from "./modules/assistant/session-row.js";
 import { serializeAgentSessions } from "./modules/assistant/session-persistence.js?v=20260728-verification-workflow";
+import { installAgentDragging, installAgentPanelDragging, isAgentCompactViewport, nativeCompanionPanelSize, syncNativeCompanionOpenState } from "./modules/assistant/companion-window.js?v=20260826-native-companion2";
 import { masterFrontierObjectiveKind, masterFrontierRouteId, masterFrontierUsefulFallback } from "./modules/master-frontier/useful-fallback.js?v=20260804-frontier-modality2";
 import { masterFrontierExplicitProtocol, masterFrontierProtocolRequest } from "./modules/master-frontier/source-investigation.js?v=20260806-frontier-protocol1";
 import { MASTER_FRONTIER_V3_SCHEMA, masterFrontierV3Instructions, masterFrontierV3OutputBudget } from "./modules/master-frontier/cyphers-v3.js";
 import { isMasterFrontierTimelineAction, masterFrontierDecisionCost, masterFrontierNewInputTokens, masterFrontierTimelineIcon } from "./modules/master-frontier/timeline.js?v=20260806-v6-cost1";
 import { masterFrontierCommentaryFromAction, masterFrontierLiveStepFromAction, masterFrontierLiveStepFromPayload } from "./modules/master-frontier/live-commentary.js?v=20260803-codex-commentary1";
-import { masterFrontierActivityText, masterFrontierInitialCommentary, showMasterFrontierRunActivity } from "./modules/master-frontier/activity-presentation.js?v=20260806-codex-stack2";
-import { mergeMasterFrontierSessionStatusDiagnostics, mergeMasterFrontierStatusUsage, refreshMasterFrontierStatus, renderMasterFrontierStatusPanel } from "./modules/master-frontier/status-panel.js?v=20260822-thread-session-tokens1";
+import { appendMasterFrontierDecisionTrace, masterFrontierActivityText, masterFrontierHeartbeatBodyContent, masterFrontierInitialDecisionTrace, masterFrontierMessageContentNodes, masterFrontierPublicCommentary, renderMasterFrontierDecisionTrace, renderMasterFrontierRunDetails, showMasterFrontierAnswerBody, showMasterFrontierRunActivity } from "./modules/master-frontier/activity-presentation.js?v=20260826-card-details3";
+import { masterFrontierRequestPreferences, mergeMasterFrontierSessionStatusDiagnostics, mergeMasterFrontierStatusUsage, refreshMasterFrontierStatus, renderMasterFrontierStatusPanel } from "./modules/master-frontier/status-panel.js?v=20260826-reasoning-effort1";
 import { markMasterFrontierInterrupted, masterFrontierContinuationContext, masterFrontierFailureDisposition, masterFrontierPartialReplyFromError, masterFrontierPartialReplyFromPending, recoverMasterFrontierFinal, requiredMasterFrontierContinuationContext, resolvePendingAgentRunId } from "./modules/master-frontier/continuation.js?v=20260804-frontier-modality2";
 import { masterFrontierChangeDiagnostics, renderMasterFrontierChangeEvidence } from "./modules/master-frontier/change-evidence.js";
 import { masterFrontierRouteProofFromFinal } from "./modules/master-frontier/route-proof.js?v=20260806-v6-latency1";
-import { SPACE_APP_DEFINITIONS, SPACE_APP_MAPPINGS, ensureExternalAppOpen, hydrateOpenExternalApps, openExternalAppFromIcon, installExternalAppHosts } from "./modules/app-registry.js?v=20260820-native-input-receipt2";
+import { SPACE_APP_DEFINITIONS, SPACE_APP_MAPPINGS, ensureExternalAppOpen, hydrateOpenExternalApps, openExternalAppFromIcon, installExternalAppHosts } from "./modules/app-registry.js?v=20260825-widget-lifecycle1";
 import { applyWidgetWindowState } from "./modules/widget-window-state.js";
 import { widgetDimensionLimits } from "./modules/widget-dimensions.js";
-import { startClientPresence } from "./modules/client-presence.js?v=20260820-active-space1";
+import { startClientPresence } from "./modules/client-presence.js?v=20260828-agent-session-control1";
 import { installResourceProfiler } from "./modules/performance/resource-profiler.js";
 import { applyWidgetIcon, widgetIconDataUri } from "./modules/widget-icons.js";
-import { cloneSpaceWidgetLayout, closeUnpositionedWidgets, homeCleanWidgetLayout, initialVisibleWidgetPosition, mappedWidgetIdsForSpace, organizedSpaceAppPositions } from "./modules/space-widget-policy.js?v=20260820-durable-open1";
-import { openSpaceByReference } from "./modules/space-control.js";
+import { appRect, cloneSpaceWidgetLayout, closeUnpositionedWidgets, homeCleanWidgetLayout, initialVisibleWidgetPosition, mappedWidgetIdsForSpace, nearestOpenAppPosition, organizedSpaceAppPositions } from "./modules/space-widget-policy.js?v=20260825-drag-collision1";
+import { authenticatedClientSpaces, clientSpaceCatalog, openSpaceByReference } from "./modules/space-control.js?v=20260825-space-catalog1";
 import { ensureWidgetResizeHandles, resizedWidgetRect } from "./modules/widget-window-contract.js?v=20260802-windows-resize2";
 import { publishAvatarChatLayer } from "./modules/shell-overlay-contract.js?v=20260802-avatar-layer1";
 import { latestObservationEvents, observationBrowserProjection, observationBrowserSummary, observationEventCounts } from "./modules/observation/module.js?v=20260803-observation-contract1";
@@ -405,8 +406,6 @@ const CHAT_QUERY_KEY = "chat";
 const CHAT_QUERY_VALUE = "wasm-agent-chat";
 const WIDGET_Z_BASE = 20;
 const WIDGET_Z_LIMIT = 9000;
-const APP_ICON_GRID_PX = 5;
-const APP_ICON_COLLISION_TOLERANCE_PX = Math.ceil(APP_ICON_GRID_PX / 2);
 const APP_ORGANIZER_TOP_INSET_PX = 30;
 const SPACE_CANVAS_EDGE_INSET_PX = 0;
 const SPACE_MINIMAP_HIDE_MS = 180;
@@ -10151,7 +10150,6 @@ function sharedSpacePointerPredictionToggle(enabled = true) {
   try {
     localStorage.setItem(SHARED_SPACE_POINTER_PREDICTION_STORAGE_KEY, enabled ? "1" : "0");
   } catch {
-    // Legacy prediction preference is optional.
   }
   Object.values(state.sharedSpacePointerVisuals || {}).forEach((visual) => {
     visual.predictionLeadMs = 0;
@@ -13764,7 +13762,7 @@ function saveAgentLayout() {
 
 function defaultAgentPanelSize() {
   const appRect = appViewportRect();
-  if (isCompactViewport()) {
+  if (isAgentCompactViewport(isCompactViewport())) {
     return {
       width: Math.max(1, Math.round(appRect.width)),
       height: Math.max(1, Math.round(appRect.height)),
@@ -13779,9 +13777,11 @@ function defaultAgentPanelSize() {
 }
 
 function clampAgentPanelSize(size = {}) {
+  const companionSize = nativeCompanionPanelSize(size);
+  if (companionSize) return companionSize;
   const fallback = defaultAgentPanelSize();
   const appRect = appViewportRect();
-  if (isCompactViewport()) {
+  if (isAgentCompactViewport(isCompactViewport())) {
     return {
       width: Math.max(1, Math.round(appRect.width)),
       height: Math.max(1, Math.round(appRect.height)),
@@ -18155,10 +18155,6 @@ function spaceApps(panel = state.activePanel) {
     if (app.home && spaceId !== "home") return false;
     return !app.module || isModuleEnabled(app.module);
   });
-}
-
-function snapToAppGrid(value) {
-  return Math.round(Number(value || 0) / APP_ICON_GRID_PX) * APP_ICON_GRID_PX;
 }
 
 function createSpaceAppButton(app) {
@@ -22794,7 +22790,7 @@ function handleAgentStreamLine(line, pendingMessage) {
     if (payload.action) mergeAgentAction(pendingMessage, payload.action);
     updateAgentPendingMessage(pendingMessage, {
       phase: masterFrontierLiveStepFromPayload(payload) || pendingMessage.phase || "Waiting for agent",
-      content: payload.message || pendingMessage.content,
+      content: masterFrontierHeartbeatBodyContent(pendingMessage, payload.message),
     });
   }
   if (payload.type === "delta" && payload.delta) {
@@ -23129,6 +23125,7 @@ function setAgentOpen(open, options = {}) {
   const changed = state.agentOpen !== nextOpen;
   state.agentOpen = nextOpen;
   els.agentOverlay.dataset.open = nextOpen ? "true" : "false";
+  syncNativeCompanionOpenState(nextOpen, state.agentLayout);
   publishAvatarChatLayer(nextOpen);
   els.agentAvatarButton.setAttribute("aria-expanded", nextOpen ? "true" : "false");
   if (nextOpen) {
@@ -23487,18 +23484,12 @@ function renderAgentMessage(message) {
   if (imageCards) wrap.append(imageCards);
   const fileAttachments = renderAgentFileAttachments(message);
   if (fileAttachments) wrap.append(fileAttachments);
-  if (header) wrap.append(header);
-  if (showRunActivity) wrap.append(body);
   const timeline = showRunActivity ? renderAgentTimeline(message) : null;
-  if (timeline) wrap.append(timeline);
   const tokenLedger = showRunActivity ? renderAgentTokenLedger(message) : null;
-  if (tokenLedger) wrap.append(tokenLedger);
   const actions = showRunActivity ? agentActionsChain(message) : null;
-  if (actions) wrap.append(actions);
-  if (!showRunActivity) wrap.append(body);
   const commandChoices = showRunActivity ? renderAgentCommandChoices(message) : null;
-  if (commandChoices) wrap.append(commandChoices);
   if (socialChat) {
+    wrap.append(body);
     const meta = renderDirectMessageMeta(message);
     if (meta) wrap.append(meta);
     const reactions = direct ? renderDirectReactions(message) : null;
@@ -23512,7 +23503,17 @@ function renderAgentMessage(message) {
       },
     })
     : null;
-  if (changedFiles) wrap.append(changedFiles);
+  const decisionTrace = showRunActivity ? renderMasterFrontierDecisionTrace(message) : null;
+  const runDetails = showRunActivity
+    ? renderMasterFrontierRunDetails({ changedFiles, timeline, tokenLedger, actions, decisionTrace }, message)
+    : null;
+  if (runDetails && message?.id) bindAgentDetailsOpenState(runDetails, `run-details:${message.id}`, Boolean(message.pending), {
+    autoCloseOnDone: true,
+    status: message.pending ? "running" : "done",
+  });
+  if (!socialChat) wrap.append(...masterFrontierMessageContentNodes({
+    header, runDetails, body: showMasterFrontierAnswerBody(message) ? body : null, commandChoices,
+  }));
   if (state.agentOpenMessageMenuId === message.id && !header) wrap.append(agentMessageMenu(message));
   installAgentMessageMenuInteractions(wrap, message);
   return wrap;
@@ -25078,7 +25079,7 @@ async function callMasterFrontierDirectHead(message, transcript = [], observatio
     transcript: envelope.compact_state.transcript,
     instructions: masterFrontierV3Instructions(),
     max_output_tokens: masterFrontierV3OutputBudget(message),
-    text_verbosity: "low",
+    ...masterFrontierRequestPreferences(),
   };
   let response = null;
   if ("ReadableStream" in window && "TextDecoder" in window && options.pendingMessage) {
@@ -29501,6 +29502,7 @@ function compactAgentActionRows(actions = []) {
   for (const action of actions) {
     if (isAgentPollAction(action)) continue;
     if (isAgentTimelineAction(action)) continue;
+    if (masterFrontierPublicCommentary(action)) continue;
     rows.push(action);
   }
   return rows;
@@ -29763,7 +29765,10 @@ function mergeAgentAction(message, nextAction) {
   }
   const phase = message.pending ? masterFrontierLiveStepFromAction(normalized) : "";
   const commentary = message.pending ? masterFrontierCommentaryFromAction(normalized) : "";
-  updateAgentPendingMessage(message, { actions, ...(phase ? { phase } : {}), ...(commentary ? { content: commentary } : {}) });
+  const decisionTrace = commentary
+    ? appendMasterFrontierDecisionTrace(message.decision_trace, normalized, commentary)
+    : message.decision_trace;
+  updateAgentPendingMessage(message, { actions, decision_trace: decisionTrace, ...(phase ? { phase } : {}) });
 }
 
 function finalAgentActionStatus(status) {
@@ -31995,7 +32000,7 @@ function placeAgentPanel() {
   const panelRect = panel.getBoundingClientRect();
   const panelWidth = panelRect.width || 430;
   const panelHeight = panelRect.height || 620;
-  if (isCompactViewport()) {
+  if (isAgentCompactViewport(isCompactViewport())) {
     panel.style.left = `${appRect.left - overlayRect.left}px`;
     panel.style.top = `${appRect.top - overlayRect.top}px`;
     panel.style.right = "auto";
@@ -32049,112 +32054,6 @@ function moveAgentGroupFromPanelRect(panelLeft, panelTop, panelWidth, panelHeigh
   els.agentOverlay.style.right = "auto";
   els.agentOverlay.style.bottom = "auto";
   placeAgentPanel();
-}
-
-function installAgentDragging() {
-  els.agentAvatarButton.addEventListener("pointerdown", (event) => {
-    if (!isPrimaryPointer(event)) return;
-    event.preventDefault();
-    const start = els.agentOverlay.getBoundingClientRect();
-    const offsetX = event.clientX - start.left;
-    const offsetY = event.clientY - start.top;
-    const startX = event.clientX;
-    const startY = event.clientY;
-    let moved = false;
-    document.body.classList.add("is-agent-dragging");
-    try {
-      els.agentAvatarButton.setPointerCapture(event.pointerId);
-    } catch {
-      // Some browser/devtool reload states can drop capture; window listeners still carry the drag.
-    }
-    const move = (moveEvent) => {
-      if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 3) moved = true;
-      const { left, top } = clampAgentLayout({
-        left: moveEvent.clientX - offsetX,
-        top: moveEvent.clientY - offsetY,
-      });
-      els.agentOverlay.style.left = `${left}px`;
-      els.agentOverlay.style.top = `${top}px`;
-      els.agentOverlay.style.right = "auto";
-      els.agentOverlay.style.bottom = "auto";
-      state.agentLayout = { left, top };
-      placeAgentPanel();
-    };
-    const end = () => {
-      document.body.classList.remove("is-agent-dragging");
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", end);
-      window.removeEventListener("pointercancel", end);
-      state.agentLayout = clampAgentLayout(state.agentLayout);
-      els.agentOverlay.style.left = `${state.agentLayout.left}px`;
-      els.agentOverlay.style.top = `${state.agentLayout.top}px`;
-      placeAgentPanel();
-      saveAgentLayout();
-      if (moved) {
-        state.agentDragSuppressClick = true;
-        window.setTimeout(() => {
-          state.agentDragSuppressClick = false;
-        }, 0);
-        recordUserEvent("agent.dragged", {
-          target: "agent-overlay",
-          summary: "Moved embedded assistant avatar",
-          data: state.agentLayout,
-        });
-      }
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", end, { once: true });
-    window.addEventListener("pointercancel", end, { once: true });
-  });
-}
-
-function installAgentPanelDragging() {
-  const handle = els.agentPanel?.querySelector(".agent-panel-head");
-  if (!handle) return;
-  handle.addEventListener("pointerdown", (event) => {
-    if (!isPrimaryPointer(event)) return;
-    if (event.target.closest("button,input,textarea,select,s-select,a")) return;
-    event.preventDefault();
-    const panelRect = els.agentPanel.getBoundingClientRect();
-    const offsetX = event.clientX - panelRect.left;
-    const offsetY = event.clientY - panelRect.top;
-    const startX = event.clientX;
-    const startY = event.clientY;
-    let moved = false;
-    document.body.classList.add("is-agent-dragging");
-    try {
-      handle.setPointerCapture(event.pointerId);
-    } catch {
-      // Window listeners below keep the drag alive if capture is interrupted.
-    }
-    const move = (moveEvent) => {
-      if (Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) > 3) moved = true;
-      moveAgentGroupFromPanelRect(
-        moveEvent.clientX - offsetX,
-        moveEvent.clientY - offsetY,
-        els.agentPanel.offsetWidth || 430,
-        els.agentPanel.offsetHeight || 620
-      );
-    };
-    const end = () => {
-      document.body.classList.remove("is-agent-dragging");
-      window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", end);
-      window.removeEventListener("pointercancel", end);
-      placeAgentPanel();
-      saveAgentLayout();
-      if (moved) {
-        recordUserEvent("agent.dragged", {
-          target: "agent-overlay",
-          summary: "Moved embedded assistant avatar and chat together",
-          data: state.agentLayout,
-        });
-      }
-    };
-    window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", end, { once: true });
-    window.addEventListener("pointercancel", end, { once: true });
-  });
 }
 
 function installNodesPanelDragging() {
@@ -32643,7 +32542,7 @@ async function sendAgentMessage(text) {
           : { endpoint: "/agent/session/message", mode, target_node: targetNode, model: chatModel?.id || "" },
       })
     );
-    const pendingMessage = appendAgentMessage("assistant", useMasterFrontier ? masterFrontierInitialCommentary() : useDirectApi ? "Calling provider..." : useOwnedBridge ? "Calling agent..." : `Waiting for ${targetNode}...`, {
+    const pendingMessage = appendAgentMessage("assistant", useMasterFrontier ? "" : useDirectApi ? "Calling provider..." : useOwnedBridge ? "Calling agent..." : `Waiting for ${targetNode}...`, {
       pending: true,
       phase: useMasterFrontier ? "Direct head" : useDirectApi ? "Provider" : useOwnedBridge ? "Owned agent" : "Inspecting context",
       target_node: targetNode,
@@ -32656,6 +32555,7 @@ async function sendAgentMessage(text) {
       original_objective: userMessageContent,
       resume_key: `${activeSession.id}:${backendTurnId || runHintId}`,
       actions: initialActions,
+      decision_trace: useMasterFrontier ? masterFrontierInitialDecisionTrace() : undefined,
     });
     startAgentTurnTimer(pendingMessage);
     if (useMasterFrontier) {
@@ -42260,8 +42160,14 @@ function wireEvents() {
     installWidgetResizing();
     installSpacePanning();
   installSharedSpacePointerAwareness();
-  installAgentDragging();
-  installAgentPanelDragging();
+  installAgentDragging({
+    avatarButton: els.agentAvatarButton, overlay: els.agentOverlay, body: document.body, state,
+    isPrimaryPointer, clampAgentLayout, placeAgentPanel, saveAgentLayout, recordUserEvent,
+  });
+  installAgentPanelDragging({
+    panel: els.agentPanel, body: document.body, state, isPrimaryPointer,
+    moveAgentGroupFromPanelRect, placeAgentPanel, saveAgentLayout, recordUserEvent,
+  });
   installNodesPanelDragging();
   installSpaceMiniMapPrintCapture();
   clientBootMark("deferred_interaction_handlers_finished", {
@@ -42621,12 +42527,12 @@ async function main() {
   startNativeAuthDiagnosticHeartbeat();
   startClientPresence({
     getActiveSpace: activeSpaceContext,
+    getSpaceCatalog: () => clientSpaceCatalog({ spaces: authenticatedClientSpaces(state.userSpaces, { includeAdmin: isAdminUser() }), activeSpaceId: state.activePanel, widgetIdsForSpace: mappedAppIdsForPanel }),
     async openWidget(widgetId) {
       const app = SPACE_APP_DEFINITIONS.find((item) => item.id === widgetId);
-      if (!app?.entry) throw new Error("widget_not_registered");
       return ensureExternalAppOpen(app, widgetLayout(app.id).minimized, (minimized) => setWidgetMinimized(app.id, minimized));
     },
-    openSpace: (reference) => openSpaceByReference(reference, { spaces: state.userSpaces, activeSpaceId: state.activePanel, activate: setPanel }),
+    openSpace: (reference) => openSpaceByReference(reference, { spaces: authenticatedClientSpaces(state.userSpaces, { includeAdmin: isAdminUser() }), activeSpaceId: state.activePanel, activate: setPanel }),
     async applyWindowsUpdate(payload = {}) {
       const bridge = windowsNativeDiagnosticsBridge();
       if (!bridge?.run) throw new Error("windows_update_bridge_unavailable");

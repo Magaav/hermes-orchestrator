@@ -156,6 +156,9 @@ def capability(value: dict[str, Any]) -> dict[str, Any]:
     if mode not in {"read", "write"}:
         raise ContractError("capability_mode_invalid")
     terminal_result = value.get("terminal_result") is True
+    authorization = str(value.get("authorization") or "reviewed")
+    if authorization not in {"reviewed", "bounded_terminal"}:
+        raise ContractError("capability_authorization_invalid")
     proof = [str(item)[:120] for item in (value.get("proof") or [])[:16]]
     if terminal_result and not ((kind == "observe" and mode == "read") or (kind == "act" and mode == "write" and proof)):
         raise ContractError("capability_terminal_result_unsafe")
@@ -167,9 +170,14 @@ def capability(value: dict[str, Any]) -> dict[str, Any]:
         "result": value.get("result") if isinstance(value.get("result"), dict) else {"type": "object"},
         "proof": proof,
         "completion_proof": [str(item)[:120] for item in (value.get("completion_proof") or [])[:16]],
+        "completion_effects": [str(item)[:120] for item in (value.get("completion_effects") or [])[:16] if ID.fullmatch(str(item))],
+        "goal_completion": value.get("goal_completion") is not False,
+        "setup_allowed": value.get("setup_allowed") is True,
+        "activates": [str(item)[:160] for item in (value.get("activates") or [])[:16] if ID.fullmatch(str(item))],
         "conflicts": [str(item)[:240] for item in (value.get("conflicts") or [])[:16]],
         "requires_after": [str(item)[:160] for item in (value.get("requires_after") or [])[:16] if ID.fullmatch(str(item))],
         "terminal_result": terminal_result,
+        "authorization": authorization,
         "detail": str(value.get("detail") or "")[:240],
     }
 
@@ -187,6 +195,7 @@ def operation(value: dict[str, Any]) -> dict[str, Any]:
         "expect": value.get("expect") if isinstance(value.get("expect"), dict) else {},
         "completes_goal": value.get("completes_goal") is True,
         "goal_id": str(value.get("goal_id") or "")[:160],
+        "idempotency_key": str(value.get("idempotency_key") or operation_id)[:160],
         "say": commentary(value.get("say")) if value.get("say") else None,
     }
 

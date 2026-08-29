@@ -7,7 +7,7 @@ import time
 import zlib
 from typing import Any, Callable
 
-from . import contracts
+from . import contracts, trajectory
 
 
 SNAPSHOT_SCHEMA = "master.frontier.v6.controller.snapshot.v1"
@@ -53,6 +53,11 @@ def save(
 ) -> dict[str, Any]:
     if snapshot.get("schema") != SNAPSHOT_SCHEMA:
         raise PersistenceError("v6_snapshot_schema_invalid")
+    if isinstance(snapshot.get("trajectory"), dict):
+        try:
+            trajectory.verify(snapshot["trajectory"])
+        except trajectory.TrajectoryError as exc:
+            raise PersistenceError(exc.code) from exc
     raw = contracts.canonical(snapshot).encode("utf-8")
     if len(raw) > MAX_SNAPSHOT_BYTES:
         raise PersistenceError("v6_snapshot_too_large")
@@ -113,6 +118,11 @@ def load(
         raise PersistenceError("v6_checkpoint_invalid") from exc
     if not isinstance(snapshot, dict) or snapshot.get("schema") != SNAPSHOT_SCHEMA:
         raise PersistenceError("v6_checkpoint_invalid")
+    if isinstance(snapshot.get("trajectory"), dict):
+        try:
+            trajectory.verify(snapshot["trajectory"])
+        except trajectory.TrajectoryError as exc:
+            raise PersistenceError(exc.code) from exc
     return snapshot
 
 

@@ -1,0 +1,100 @@
+{
+  "capability_ok": true,
+  "capability_used": true,
+  "changed_files": [],
+  "duration_ms": 23199,
+  "expected_capability": "client.windows.desktop.windows.list",
+  "expected_proof": "windows.desktop.top_level_windows",
+  "fixture": "windows-list",
+  "label": "isolated-codex-thread-control",
+  "ok": true,
+  "performance": {
+    "checkpoint": {
+      "count": 2,
+      "duration_ms": 36
+    },
+    "phases": {
+      "host_after_last_provider_ms": 9471,
+      "host_before_first_provider_ms": 80,
+      "host_between_providers_ms": 0,
+      "ingress_to_v6_ms": 0,
+      "provider_ms": 13556
+    },
+    "projection": {
+      "body_bytes": 10124,
+      "calls": 1,
+      "message_content_bytes": 5981,
+      "messages_bytes": 6164,
+      "tools_bytes": 2655
+    },
+    "provider_calls": [
+      {
+        "decision": 1,
+        "duration_ms": 13556,
+        "ok": true,
+        "projection": {
+          "body_bytes": 10124,
+          "message_content_bytes": 5981,
+          "messages_bytes": 6164,
+          "tools_bytes": 2655
+        }
+      }
+    ],
+    "schema": "master.frontier.v6.performance.v1",
+    "total_ms": 23106,
+    "v6_internal_ms": 23106
+  },
+  "proof_verified": true,
+  "provider_calls": 1,
+  "reply": "12 visible top-level Windows windows: WASM Agent (WASM Agent); WhatsApp Web (chrome); logo.png - local [SSH: openclaw.ohana] - Visual Studio Code (Code); #template.js - colmeio [WSL: Ubuntu] - Visual Studio Code (Code); Colmeio Universe - Google Chrome (chrome); Offset a background image from the right using CSS - Stack Overflow - Google Chrome (chrome); WASM Agent (WindowsTerminal); Agent Browser Tunnel (WindowsTerminal); Administrator: Agent Browser for WSL (cmd); Back (TextInputHost); about:blank - Google Chrome (chrome); Program Manager (explorer)",
+  "run_id": "wa_run_f4340863cdd747479b4a563c0b1d5371",
+  "schema": "mf-v7.pilot.live-fixture.v1",
+  "session_id": "mfv6-lean-transport-b",
+  "token_usage": {
+    "calls": 1,
+    "context_window_tokens": 258400,
+    "exact": true,
+    "metered_calls": 1,
+    "model": "gpt-5.6-terra",
+    "provider_compaction_generation": 0,
+    "provider_compaction_status": "none",
+    "provider_thread_fork_reason": "",
+    "provider_thread_id": "01a0445a-e243-7740-a3a2-31ed6b9e42e0",
+    "provider_thread_resumed": false,
+    "provider_thread_turn": 1,
+    "rate_limits": {
+      "seven_day": {
+        "percent_left": 97,
+        "percent_used": 3,
+        "resets_at": 1788452773,
+        "window_duration_minutes": 10080
+      }
+    },
+    "stable_context_mode": "thread_continuation",
+    "stable_context_reused": false,
+    "status_telemetry": {
+      "captured_at": 1787853207,
+      "context_window": {
+        "source": "codex_app_server.token_usage",
+        "status": "reported",
+        "tokens": 258400
+      },
+      "model": {
+        "source": "resolved_request",
+        "status": "reported",
+        "value": "gpt-5.6-terra"
+      },
+      "schema": "hermes.wasm_agent.provider_status.v1",
+      "seven_day": {
+        "percent_left": 97,
+        "percent_used": 3,
+        "resets_at": 1788452773,
+        "source": "codex_app_server.account_rate_limits",
+        "status": "reported",
+        "window_duration_minutes": 10080
+      }
+    },
+    "total_tokens": 13250
+  },
+  "user_id_hash": "9633b2c7acf90741"
+}

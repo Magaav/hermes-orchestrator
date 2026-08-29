@@ -72,6 +72,20 @@ class MasterFrontierRouteContractTests(unittest.TestCase):
             self.assertEqual(entity["match_terms"], match_terms)
             self.assertEqual(entity["proof"], ["scoped_run_history", "live_state_not_collected"])
         self.assertEqual(contracts["wasm-agent.avatar-chat.ui"]["budget"]["provider_tokens_max"], 20000)
+        self.assertEqual(contracts["wasm-agent.avatar-chat.ui"]["allowed_read_roots"], [
+            str(PLUGIN_ROOT.resolve()),
+            str((PLUGIN_ROOT / "../../docs/context").resolve()),
+            str((PLUGIN_ROOT / "../../reports/context/latest").resolve()),
+        ])
+        self.assertEqual(len(contracts["wasm-agent.avatar-chat.ui"]["implementation_invariants"]), 3)
+        self.assertIn(
+            "existing registered capabilities and promises",
+            contracts["wasm-agent.avatar-chat.ui"]["implementation_invariants"][0],
+        )
+        self.assertIn(
+            "unless repository evidence establishes that it is absent",
+            contracts["wasm-agent.avatar-chat.ui"]["implementation_invariants"][2],
+        )
         self.assertEqual(contracts["wasm-agent.avatar-chat.ui"]["budget"]["provider_call_ms_max"], 90000)
         self.assertIn(
             "agent-session-persistence",

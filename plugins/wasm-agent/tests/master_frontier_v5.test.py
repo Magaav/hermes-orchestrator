@@ -55,6 +55,7 @@ class MasterFrontierV5Tests(unittest.TestCase):
         self.assertEqual(calls[0][1], proxy["tools"])
         self.assertEqual(calls[0][2], {
             "completion_only": False, "require_tool": True, "timeout": 12, "model": "gpt-5.6-sol",
+            "session_key": "run-sub", "route_id": "",
         })
 
     def test_search_is_grounded_in_distinctive_objective_terms(self) -> None:

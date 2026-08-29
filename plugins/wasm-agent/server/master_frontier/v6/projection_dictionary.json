@@ -5,6 +5,7 @@
     "G": "goal",
     "C": "capability",
     "S": "state",
+    "Q": "action_goal",
     "E": "evidence",
     "P": "untrusted_evidence_payload",
     "D": "operation",

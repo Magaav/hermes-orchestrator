@@ -1,4 +1,4 @@
-const CACHE_NAME = "wasm-agent-v171-route-contracts";
+const CACHE_NAME = "wasm-agent-v172-agent-prompt-control";
 const ASSETS = [
   "/android-app.js",
   "/app-loader.js",
@@ -29,7 +29,6 @@ const ASSETS = [
   "/modules/spaces/module.js",
   "/modules/spaces/shared-pointer-renderer.js",
   "/modules/spaces/shared-voice-room.js",
-  "/modules/browser/module.js",
   "/modules/wis/module.js",
   "/modules/wis/engine.js",
   "/modules/wis/artifacts/camera.js",
@@ -104,7 +103,7 @@ self.addEventListener("fetch", (event) => {
     url.pathname === "/modules/hmr/events"
   ) return;
   event.respondWith(
-    fetch(event.request)
+    fetch(event.request, url.pathname.startsWith("/modules/") ? { cache: "no-cache" } : undefined)
       .then((response) => {
         const clone = response.clone();
         caches.open(CACHE_NAME).then((cache) => cache.put(event.request, clone));

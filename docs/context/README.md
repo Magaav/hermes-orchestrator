@@ -15,6 +15,7 @@ future empty-context agent cheap, fast, and hard to mislead.
 | `HARNESS.md` | Self-improving harness contract and promotion rules |
 | `HARNESS_LOOPS.json` | Machine-readable five-loop state machines, benchmark matrix, regression gate, budgets, banks, and terminal outcomes |
 | `HARNESS_PROMISES.json` | Machine-readable deterministic promise registry |
+| `CLAIM_RISK_PROOF_MATRIX.json` | Production-critical claim ownership, risk, evidence, freshness, and acceptance gates |
 | `PRODUCT_READINESS_RESULT_SCHEMA.json` | Versioned aggregate result contract for the three canonical wasm-agent journeys |
 
 ## Status Enum
@@ -46,8 +47,7 @@ The default is artifact-only: it inspects and freshness-checks existing proof
 artifacts without running a provider, production command, native-control loop,
 build, install, or device action. `--run <journey-id>` is the explicit opt-in
 for serialized execution of that journey's registered promises. The stable
-journey IDs are `repository-agent`, `electron-browser-agent`, and
-`android-voice-agent`; `--run all` is intentionally stateful and must not be
+journey IDs are `repository-agent` and `android-voice-agent`; `--run all` is intentionally stateful and must not be
 the default.
 
 The authoritative result uses schema

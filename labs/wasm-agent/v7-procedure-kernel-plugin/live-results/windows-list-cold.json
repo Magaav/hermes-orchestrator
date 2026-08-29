@@ -1,0 +1,133 @@
+{
+  "capability_ok": true,
+  "capability_used": true,
+  "changed_files": [],
+  "duration_ms": 46769,
+  "expected_capability": "client.windows.desktop.windows.list",
+  "expected_proof": "windows.desktop.top_level_windows",
+  "fixture": "windows-list",
+  "label": "cold",
+  "ok": true,
+  "performance": {
+    "checkpoint": {
+      "count": 4,
+      "duration_ms": 237
+    },
+    "phases": {
+      "host_after_last_provider_ms": 125,
+      "host_before_first_provider_ms": 66,
+      "host_between_providers_ms": 14851,
+      "ingress_to_v6_ms": 0,
+      "provider_ms": 31471
+    },
+    "projection": {
+      "body_bytes": 46288,
+      "calls": 4,
+      "message_content_bytes": 28802,
+      "messages_bytes": 30556,
+      "tools_bytes": 10620
+    },
+    "provider_calls": [
+      {
+        "decision": 1,
+        "duration_ms": 6074,
+        "ok": true,
+        "projection": {
+          "body_bytes": 8164,
+          "message_content_bytes": 4101,
+          "messages_bytes": 4231,
+          "tools_bytes": 2655
+        }
+      },
+      {
+        "decision": 2,
+        "duration_ms": 10819,
+        "ok": true,
+        "projection": {
+          "body_bytes": 10495,
+          "message_content_bytes": 6372,
+          "messages_bytes": 6562,
+          "tools_bytes": 2655
+        }
+      },
+      {
+        "decision": 3,
+        "duration_ms": 8597,
+        "ok": true,
+        "projection": {
+          "body_bytes": 13802,
+          "message_content_bytes": 9154,
+          "messages_bytes": 9869,
+          "tools_bytes": 2655
+        }
+      },
+      {
+        "decision": 4,
+        "duration_ms": 5981,
+        "ok": true,
+        "projection": {
+          "body_bytes": 13827,
+          "message_content_bytes": 9175,
+          "messages_bytes": 9894,
+          "tools_bytes": 2655
+        }
+      }
+    ],
+    "schema": "master.frontier.v6.performance.v1",
+    "total_ms": 46513,
+    "v6_internal_ms": 46513
+  },
+  "proof_verified": true,
+  "provider_calls": 4,
+  "reply": "The visible top-level windows report these application/process names: WASM Agent, chrome, Code, WindowsTerminal, cmd, TextInputHost, and explorer. There are 12 windows total, including multiple windows for chrome, Code, and WindowsTerminal.",
+  "run_id": "wa_run_dac5261e139b4e0ea57218f66f85a61a",
+  "schema": "mf-v7.pilot.live-fixture.v1",
+  "session_id": "mfv7-live-windows-a",
+  "token_usage": {
+    "calls": 4,
+    "context_window_tokens": 258400,
+    "exact": true,
+    "metered_calls": 4,
+    "model": "gpt-5.6-luna",
+    "provider_compaction_generation": 0,
+    "provider_compaction_status": "none",
+    "provider_thread_fork_reason": "",
+    "provider_thread_id": "01a04415-4134-7a73-b07d-22f330caa6b5",
+    "provider_thread_resumed": true,
+    "provider_thread_turn": 4,
+    "rate_limits": {
+      "seven_day": {
+        "percent_left": 100,
+        "percent_used": 0,
+        "resets_at": 1788452773,
+        "window_duration_minutes": 10080
+      }
+    },
+    "stable_context_mode": "thread_continuation",
+    "stable_context_reused": true,
+    "status_telemetry": {
+      "captured_at": 1787848684,
+      "context_window": {
+        "source": "codex_app_server.token_usage",
+        "status": "reported",
+        "tokens": 258400
+      },
+      "model": {
+        "source": "resolved_request",
+        "status": "reported",
+        "value": "gpt-5.6-luna"
+      },
+      "schema": "hermes.wasm_agent.provider_status.v1",
+      "seven_day": {
+        "percent_left": 100,
+        "percent_used": 0,
+        "resets_at": 1788452773,
+        "source": "codex_app_server.account_rate_limits",
+        "status": "reported",
+        "window_duration_minutes": 10080
+      }
+    },
+    "total_tokens": 75893
+  },
+  "user_id_hash": "9633b2c7acf90741"
+}

@@ -1,0 +1,172 @@
+{
+  "checks": {
+    "codexReferenceComplete": true,
+    "routerCoversAtLeastHalfHeldOutParaphrases": false,
+    "routerCoversEveryAdmittedExactIntent": true,
+    "routerHasZeroUnsafeMisroutes": true,
+    "routerUsesNoProvider": true,
+    "unknownAmbiguousAndDestructiveFailClosed": true
+  },
+  "codex": {
+    "status": "not_run"
+  },
+  "decision": "prune-semantic-router",
+  "fixtures": 16,
+  "limitations": [
+    "The Codex reference is one batched quality call, not twelve production latency samples.",
+    "Fallback coverage costs tokens later; this pilot optimizes only confidently repeated intents.",
+    "No production selector or MF-v7 core routing is changed."
+  ],
+  "router": {
+    "duration_ms": 41.143,
+    "provider_calls": 0,
+    "results": [
+      {
+        "correct": true,
+        "expected": "windows.apps.list",
+        "id": "w1",
+        "label": "windows.apps.list",
+        "score": 1.0,
+        "status": "routed",
+        "utterance": "what apps are open on windows"
+      },
+      {
+        "correct": true,
+        "expected": "windows.apps.list",
+        "id": "w2",
+        "label": "windows.apps.list",
+        "score": 0.833333,
+        "status": "routed",
+        "utterance": "please list the visible windows applications"
+      },
+      {
+        "correct": true,
+        "expected": "windows.apps.list",
+        "id": "w3",
+        "label": "windows.apps.list",
+        "score": 1.0,
+        "status": "routed",
+        "utterance": "which programs are currently open"
+      },
+      {
+        "correct": true,
+        "expected": "browser.cdp.persistent",
+        "id": "p1",
+        "label": "browser.cdp.persistent",
+        "score": 1.0,
+        "status": "routed",
+        "utterance": "open cdp"
+      },
+      {
+        "correct": true,
+        "expected": "browser.cdp.persistent",
+        "id": "p2",
+        "label": "browser.cdp.persistent",
+        "score": 1.0,
+        "status": "routed",
+        "utterance": "start my persistent cdp browser session"
+      },
+      {
+        "correct": true,
+        "expected": "browser.cdp.incognito",
+        "id": "i1",
+        "label": "browser.cdp.incognito",
+        "score": 1.0,
+        "status": "routed",
+        "utterance": "open an incognito cdp"
+      },
+      {
+        "correct": true,
+        "expected": "browser.cdp.incognito",
+        "id": "i2",
+        "label": "browser.cdp.incognito",
+        "score": 0.738636,
+        "status": "routed",
+        "utterance": "open a private disposable browser session"
+      },
+      {
+        "correct": false,
+        "expected": "windows.apps.list",
+        "id": "h1",
+        "label": "provider_fallback",
+        "score": null,
+        "status": "semantic_route_low_confidence",
+        "utterance": "show me the programs running on the windows desktop"
+      },
+      {
+        "correct": false,
+        "expected": "browser.cdp.persistent",
+        "id": "h2",
+        "label": "provider_fallback",
+        "score": null,
+        "status": "semantic_route_low_confidence",
+        "utterance": "launch the durable browser debugging connection"
+      },
+      {
+        "correct": true,
+        "expected": "browser.cdp.incognito",
+        "id": "h3",
+        "label": "browser.cdp.incognito",
+        "score": 0.448361,
+        "status": "routed",
+        "utterance": "start a temporary private debugging browser"
+      },
+      {
+        "correct": false,
+        "expected": "browser.cdp.persistent",
+        "id": "h4",
+        "label": "provider_fallback",
+        "score": null,
+        "status": "semantic_route_low_confidence",
+        "utterance": "bring up my normal cdp connection"
+      },
+      {
+        "correct": true,
+        "expected": "provider_fallback",
+        "id": "u1",
+        "label": "provider_fallback",
+        "score": null,
+        "status": "semantic_route_low_confidence",
+        "utterance": "take a screenshot of my desktop"
+      },
+      {
+        "correct": true,
+        "expected": "provider_fallback",
+        "id": "u2",
+        "label": "provider_fallback",
+        "score": null,
+        "status": "semantic_route_low_confidence",
+        "utterance": "close every open window"
+      },
+      {
+        "correct": true,
+        "expected": "provider_fallback",
+        "id": "u3",
+        "label": "provider_fallback",
+        "score": null,
+        "status": "semantic_route_low_confidence",
+        "utterance": "inspect calculator controls"
+      },
+      {
+        "correct": true,
+        "expected": "provider_fallback",
+        "id": "a1",
+        "label": "provider_fallback",
+        "score": null,
+        "status": "semantic_route_ambiguous",
+        "utterance": "open the default cdp in a private disposable session"
+      },
+      {
+        "correct": true,
+        "expected": "provider_fallback",
+        "id": "a2",
+        "label": "provider_fallback",
+        "score": null,
+        "status": "semantic_route_negated",
+        "utterance": "do not list apps; open an incognito cdp"
+      }
+    ],
+    "tokens": 0
+  },
+  "schema": "master.frontier.v7.semantic-router-ab.v1"
+}

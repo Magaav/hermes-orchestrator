@@ -1,0 +1,105 @@
+{
+  "schemaVersion": 1,
+  "claims": [
+    {
+      "id": "production-claim-gate-enforced",
+      "owner": "docs/context",
+      "statement": "The harness permits a production-ready claim only when fresh, independent, artifact-bound evidence satisfies every declared acceptance threshold.",
+      "risk": {
+        "impact": "critical",
+        "likelihood": "possible",
+        "tolerance": "No false production-ready decision is accepted from missing, stale, non-independent, unbound, or below-threshold evidence."
+      },
+      "controls": [
+        "require every named evidence class",
+        "require independent evidence groups",
+        "bind every evidence source to a SHA-256 artifact digest",
+        "reject evidence older than the declared freshness window",
+        "evaluate numeric acceptance thresholds without implicit defaults"
+      ],
+      "acceptance": {
+        "requiredEvidenceClasses": [
+          "static",
+          "runtime",
+          "behavioral"
+        ],
+        "minimumIndependentGroups": 3,
+        "maximumEvidenceAgeSec": 3600,
+        "thresholds": [
+          {
+            "metric": "required_metric_coverage",
+            "operator": ">=",
+            "value": 1.0
+          },
+          {
+            "metric": "unauthorized_actions",
+            "operator": "==",
+            "value": 0
+          },
+          {
+            "metric": "false_passes",
+            "operator": "==",
+            "value": 0
+          }
+        ]
+      },
+      "invalidation": [
+        "docs/context/CLAIM_RISK_PROOF_MATRIX.json",
+        "tools/context/prove-claim-risk-proof.py",
+        "plugins/wasm-agent/tests/claim_risk_proof_e2e.test.py"
+      ]
+    },
+    {
+      "id": "android-voice-production-ready",
+      "owner": "plugins/wasm-agent; native/android; native/windows",
+      "statement": "The installed Android voice journey wakes exactly once, provides prompt avatar and listening feedback, captures and routes speech, acknowledges the action, and does not false-wake or perform unauthorized actions.",
+      "risk": {
+        "impact": "critical",
+        "likelihood": "possible",
+        "tolerance": "No production-ready decision is accepted without a fresh installed-device pass through the authorized Windows bridge and complete positive, negative, latency, threshold, responsiveness, and action-safety measurements."
+      },
+      "controls": [
+        "require fresh authenticated production native-control authority",
+        "require fresh Windows hot-shell behavioral proof",
+        "require fresh installed-device Android wake-loop proof",
+        "require complete voice metrics with no inferred defaults",
+        "require zero duplicate wakes, false wakes, and unauthorized actions",
+        "bound wake, listening, transcription, routing, and acknowledgement latency"
+      ],
+      "acceptance": {
+        "requiredEvidenceClasses": [
+          "production",
+          "behavioral",
+          "runtime"
+        ],
+        "minimumIndependentGroups": 3,
+        "maximumEvidenceAgeSec": 3600,
+        "thresholds": [
+          {"metric": "journey_pass", "operator": "==", "value": 1},
+          {"metric": "evidence_all_pass", "operator": "==", "value": 1},
+          {"metric": "required_metric_coverage", "operator": ">=", "value": 1.0},
+          {"metric": "positive_trial_count", "operator": ">=", "value": 3},
+          {"metric": "negative_trial_count", "operator": ">=", "value": 3},
+          {"metric": "duplicate_wake_count", "operator": "==", "value": 0},
+          {"metric": "false_wake_count", "operator": "==", "value": 0},
+          {"metric": "effective_wake_threshold", "operator": ">=", "value": 0.999},
+          {"metric": "responsiveness_healthy", "operator": "==", "value": 1},
+          {"metric": "wake_to_avatar_ms", "operator": "<=", "value": 250},
+          {"metric": "wake_to_listening_ms", "operator": "<=", "value": 500},
+          {"metric": "transcription_ms", "operator": "<=", "value": 5000},
+          {"metric": "routing_ms", "operator": "<=", "value": 1000},
+          {"metric": "acknowledgement_ms", "operator": "<=", "value": 1500},
+          {"metric": "unauthorized_actions", "operator": "==", "value": 0}
+        ]
+      },
+      "invalidation": [
+        "reports/context/latest/wasm-agent-product-readiness-result.json",
+        "reports/context/latest/production-native-control-authority.json",
+        "reports/windows/latest/hot-shell-proof-result.json",
+        "reports/android/wake-shell-v2/latest-shell-v2-wake-loop.json",
+        "tools/context/prove-android-voice-readiness-claim.py",
+        "tools/context/evaluate-wasm-agent-product-readiness.py"
+      ]
+    }
+  ]
+}

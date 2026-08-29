@@ -237,9 +237,25 @@ Windows fast benchmark records are appended to
 `reports/build/windows/build-benchmarks.jsonl` by default. Override the location
 with `HORC_WIN_BUILD_BENCHMARK_LOG`.
 
+For companion-token or Windows desktop-control work, use the focused registered
+source lane before paying for a package:
+
+```bash
+HORC_WIN_FAST_PACK=0 HORC_WIN_FAST_TASKS=test:companion-desktop-source horc build win-fast
+```
+
+This lane measured 3.390 seconds on 2026-08-26. It proves source contracts only.
+Avatar/chat visual-only changes stay in the cloud PWA lane and need no Windows
+package; Electron/preload/UIA changes still require one final `horc build win`,
+feed publication, supervisor update, and installed proof.
+The final lazy-startup companion/UIA package measured 112.750 seconds, making
+the focused loop 33.3x faster for ordinary iteration.
+
 The Go Native modal checks `/native/releases/latest.json` and compares it with
-metadata embedded in the current client. Windows uses a guided installer update
-unless electron-builder updater metadata is wired later. Android sideload APKs
+metadata embedded in the current client. The installed Windows supervisor can
+activate an authenticated, SHA-verified staged NSIS update silently and relaunch
+the expected build; installed reconnect and auth persistence remain separate
+proof gates. Android sideload APKs
 are guided updates only: the app must verify SHA-256, preserve package
 name/signing key, require a greater `versionCode`, and hand off to Android's
 package installer. Android may require the user to allow "install unknown apps"
@@ -284,7 +300,9 @@ installs inside each disposable builder container.
 Windows Docker builds also reuse `native/windows/src/node_modules` when the
 `package.json` and `package-lock.json` fingerprint is unchanged, avoiding a full
 `npm ci` on repeated builds. Set `HORC_FORCE_NPM_CI=1` to force a clean Node
-dependency install.
+dependency install. Native release builds first classify changed paths through
+the native evolution contract. A cloud-module or hot-bundle decision blocks
+installer packaging; `HORC_FORCE_NATIVE_REBUILD=1` is the explicit override.
 
 `horc build doctor` prints host OS/arch, Docker availability, Docker user
 permission, amd64 binfmt status, Wine builder image pullability, Android

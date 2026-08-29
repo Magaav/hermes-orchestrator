@@ -73,6 +73,7 @@ function createNavigationHarness(initialHref = "http://wasm.test/home") {
     setAgentOpen(open) {
       state.agentOpen = Boolean(open);
     },
+    isAndroidNativeShell: () => false,
   };
   vm.createContext(context);
   vm.runInContext(`

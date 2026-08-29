@@ -1,0 +1,22 @@
+{
+  "schema": "mf-v7.pilot.live-baseline.v1",
+  "run_id": "wa_run_0a5b128cbecc4ddda9ca11ba83abc483",
+  "objective": "open it again",
+  "route_id": "wasm-agent.avatar-chat.ui",
+  "capability": "client.windows.browser.cdp.default.open",
+  "required_proof": "windows.browser.cdp.persistent.ready",
+  "provider_calls": 2,
+  "input_tokens": 46679,
+  "cached_input_tokens": 22272,
+  "fresh_input_tokens": 24407,
+  "output_tokens": 303,
+  "total_tokens": 46982,
+  "latency_ms": 37883,
+  "goal_contract": "reviewed",
+  "source": "read-only production agent_run_tb and agent_token_ledger_tb inspection",
+  "limitations": [
+    "the production worker had not loaded host_bounded_terminal",
+    "provider cache behavior changed between repeated runs",
+    "the pilot benchmark does not include natural-language classification or native execution latency"
+  ]
+}

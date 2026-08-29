@@ -221,6 +221,15 @@ def api_call_diagnostics(
     }
 
 
+def decision_limit(envelope: dict[str, Any], profile_max: int) -> int:
+    """Bind one V6 loop to the smaller route-owned call target."""
+    target = from_envelope(envelope).get("api_calls_max")
+    limits = [max(1, int(profile_max))]
+    if isinstance(target, int) and target > 0:
+        limits.append(target)
+    return min(limits)
+
+
 def continuation_limit(envelope: dict[str, Any], *, calls_used: int = 0, hard_max: int = 8) -> int:
     budget = from_envelope(envelope)
     allowed = budget.get("api_calls_max")

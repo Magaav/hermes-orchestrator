@@ -41,11 +41,50 @@ class LiveClientsTest(unittest.TestCase):
         self.assertEqual(missing["capabilities"], [])
         self.assertEqual(blank["capabilities"], [])
 
+    def test_active_surface_widget_manifest_is_explicit_and_bounded(self) -> None:
+        heartbeat = live_clients.heartbeat_from_query({
+            "device_id": ["electron-a"], "runtime_type": ["electron"],
+            "space_id": ["home"], "space_name": ["space-home"],
+            "widget_manifest": [live_clients.ACTIVE_SURFACE_MANIFEST],
+            "widget_ids": ["browser,browser,artifact-foundry"],
+            "capabilities": ["control.widget.open,observe.status"],
+        }, remote_addr="127.0.0.1", received_at="2026-08-25T12:00:00Z")
+        self.assertEqual(heartbeat["widget_ids"], ["artifact-foundry", "browser"])
+        client = live_clients.normalize_client(heartbeat, now_epoch=1787659200)
+        self.assertEqual(client["widget_manifest"], live_clients.ACTIVE_SURFACE_MANIFEST)
+        self.assertEqual(client["widget_ids"], ["artifact-foundry", "browser"])
+        self.assertEqual(client["space_name"], "space-home")
+
+        legacy = live_clients.normalize_client({"device_id": "electron-old", "runtime_type": "electron"})
+        self.assertEqual(legacy["widget_manifest"], "")
+        self.assertEqual(legacy["widget_ids"], [])
+
+    def test_proved_space_result_advances_cached_surface_without_waiting_for_heartbeat(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            live_clients.save_client(root, {
+                "device_id": "electron-a", "runtime_type": "electron", "received_at": "2026-08-25T12:00:00Z",
+                "space_id": "home", "space_name": "space-home", "widget_manifest": "active-surface-v1",
+                "widget_ids": [], "capabilities": ["control.widget.open", "observe.spaces.catalog"],
+            })
+            updated = live_clients.apply_command_result_surface(root, "electron-a", "space_open", {
+                "ok": True, "space_id": "admin", "space_name": "space-admin",
+                "surface": {"manifest": "active-surface-v1", "space_id": "admin", "space_name": "space-admin", "widget_ids": ["browser"]},
+            }, received_at="2026-08-25T12:00:01Z")
+            self.assertEqual(updated["space_id"], "admin")
+            self.assertEqual(updated["widget_ids"], ["browser"])
+            self.assertIn("observe.spaces.catalog", updated["capabilities"])
+            self.assertIsNone(live_clients.apply_command_result_surface(root, "electron-a", "space_open", {
+                "ok": True, "space_id": "admin", "surface": {"manifest": "wrong", "space_id": "admin"},
+            }, received_at="2026-08-25T12:00:02Z"))
+
     def test_browser_control_registry_and_payloads_are_bounded(self) -> None:
         self.assertEqual(
             live_clients.BROWSER_CONTROL_COMMAND_TYPES,
-            {"open_widget", "space_open", "browser_navigate", "browser_input_receipt", "browser_pointer_dispatch", "browser_javascript_execute_unrestricted"},
+            {"open_widget", "space_open", "browser_navigate", "browser_input_receipt", "browser_pointer_dispatch", "browser_transaction", "browser_javascript_execute_unrestricted"},
         )
+        self.assertIn("space_catalog", live_clients.CLIENT_COMMAND_TYPES)
+        self.assertEqual(live_clients.CLIENT_OPERATOR_COMMANDS["space_catalog"], "space_catalog")
         self.assertEqual(
             live_clients.normalize_control_payload("browser_input_receipt", {"enabled": False}),
             {"enabled": False},
@@ -60,9 +99,40 @@ class LiveClientsTest(unittest.TestCase):
             live_clients.normalize_control_payload("browser_javascript_execute_unrestricted", {"javascript": "document.title"}),
             {"javascript": "document.title"},
         )
+        transaction = {"transactionId": "tx-1", "steps": [{"op": "click", "selector": "#send"}], "postconditions": [{"selector": ".outgoing", "property": "text", "equals": "hi"}]}
+        self.assertEqual(
+            live_clients.normalize_control_payload("browser_transaction", {"transaction": transaction}),
+            {"transaction": transaction},
+        )
         self.assertEqual(
             live_clients.normalize_control_payload("windows_shell_execute_unrestricted", {"command": "whoami"}),
             {"command": "whoami", "shell": "powershell", "cwd": "", "environment": {}, "timeout_ms": 60000},
+        )
+        self.assertEqual(live_clients.normalize_control_payload("show_companion_overlay", {}), {})
+        self.assertEqual(live_clients.normalize_control_payload("runtime_refresh", {}), {})
+        self.assertIn("agent_prompt_submit", live_clients.CLIENT_COMMAND_TYPES)
+        self.assertIn("agent_session_new", live_clients.CLIENT_COMMAND_TYPES)
+        self.assertEqual(live_clients.normalize_control_payload("agent_session_new", {}), {})
+        self.assertEqual(
+            live_clients.normalize_control_payload("agent_prompt_submit", {"message": "hello"}),
+            {"message": "hello"},
+        )
+        self.assertEqual(live_clients.normalize_control_payload("runtime_diagnose", {"lease_ms": 15000}), {"lease_ms": 15000})
+        self.assertEqual(
+            live_clients.normalize_control_payload("run_notepad_uia_canary", {"canary": "proof-123"}),
+            {"canary": "proof-123", "timeout_ms": 30000},
+        )
+        self.assertEqual(
+            live_clients.normalize_control_payload("windows_desktop_inspect", {"target": {"title_contains": "Calculator"}, "max_elements": 40}),
+            {"target": {"title_contains": "Calculator"}, "max_elements": 40, "max_depth": 12, "include_values": False, "timeout_ms": 15000},
+        )
+        self.assertEqual(
+            live_clients.normalize_control_payload("windows_desktop_act", {"snapshot_id": "s-0123456789abcdef", "ref": "e2", "action": "set_value", "value": "42", "expect": {"property": "value", "equals": "42"}}),
+            {"snapshot_id": "s-0123456789abcdef", "ref": "e2", "action": "set_value", "timeout_ms": 15000, "value": "42", "expect": {"property": "value", "equals": "42"}},
+        )
+        self.assertEqual(
+            live_clients.normalize_control_payload("windows_desktop_prove", {"snapshot_id": "s-0123456789abcdef", "ref": "e2", "expect": {"property": "enabled", "equals": True}}),
+            {"snapshot_id": "s-0123456789abcdef", "ref": "e2", "expect": {"property": "enabled", "equals": True}, "timeout_ms": 15000},
         )
         for command, payload in (
             ("browser_input_receipt", {"enabled": 1}),
@@ -72,10 +142,25 @@ class LiveClientsTest(unittest.TestCase):
             ("browser_pointer_dispatch", {"x": 65_536, "y": 4}),
             ("browser_pointer_dispatch", {"x": 3, "y": 4, "command_id": "model-supplied"}),
             ("browser_javascript_execute_unrestricted", {"javascript": ""}),
+            ("browser_transaction", {"transaction": []}),
             ("windows_shell_execute_unrestricted", {"command": "whoami", "shell": "bash"}),
+            ("show_companion_overlay", {"hidden": True}),
+            ("agent_prompt_submit", {"message": ""}),
+            ("agent_prompt_submit", {"message": "hello", "extra": True}),
+            ("run_notepad_uia_canary", {"canary": ""}),
+            ("windows_desktop_inspect", {"max_elements": 201}),
+            ("windows_desktop_act", {"snapshot_id": "stale", "ref": "e1", "action": "invoke"}),
+            ("windows_desktop_prove", {"snapshot_id": "s-0123456789abcdef", "ref": "e1", "expect": {"property": "secret", "equals": "x"}}),
         ):
             with self.subTest(command=command, payload=payload), self.assertRaises(ValueError):
                 live_clients.normalize_control_payload(command, payload)
+
+    def test_device_identity_is_canonical_across_heartbeat_case(self) -> None:
+        heartbeat = live_clients.heartbeat_from_query({
+            "device_id": ["win-DESKTOP-MG9DJTG-aac75f59c54ad"],
+            "runtime_type": ["electron"],
+        })
+        self.assertEqual(heartbeat["device_id"], "win-desktop-mg9djtg-aac75f59c54ad")
 
     def test_strict_operator_payload_keeps_audit_metadata_out_of_renderer_message(self) -> None:
         metadata = {"frontier_command": "browser_input_receipt", "requested_by": "operator"}

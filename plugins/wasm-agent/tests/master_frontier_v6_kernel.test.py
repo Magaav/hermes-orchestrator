@@ -202,6 +202,23 @@ class V6KernelTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["receipts"][0]["error"]["code"], "expectation_mismatch")
 
+    def test_read_observation_is_not_invalidated_by_model_expectation(self) -> None:
+        agent = kernel.Kernel(authorities={"client.ui.inspect"})
+        agent.register({
+            "id": "client.windows.desktop.inspect", "kind": "observe",
+            "authority": "client.ui.inspect", "executor": "desktop.inspect",
+            "summary": "Inspect Windows", "mode": "read", "proof": ["windows.uia.snapshot"],
+            "input": {"type": "object", "properties": {}, "additionalProperties": False},
+        }, lambda _cap, _op: {"ok": True, "observed": {"snapshot_id": "s-0123456789abcdef"}})
+
+        result = agent.run("Inspect Windows", [{
+            "id": "op.inspect", "cap": "client.windows.desktop.inspect",
+            "expect": {"snapshot_id": "*"},
+        }])
+
+        self.assertTrue(result["receipts"][0]["ok"])
+        self.assertEqual(result["receipts"][0]["observed"]["snapshot_id"], "s-0123456789abcdef")
+
     def test_cancellation_returns_typed_receipt(self) -> None:
         capability = contracts.capability({"id": "repo.read", "kind": "observe", "authority": "repo.read", "executor": "read"})
         agent = kernel.Kernel(authorities={"repo.read"})
@@ -211,7 +228,7 @@ class V6KernelTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertEqual(result["receipts"][0]["state"], "cancelled")
 
-    def test_goal_action_requires_successful_correlated_write(self) -> None:
+    def test_goal_action_requires_successful_correlated_write_or_explicit_terminal_read_proof(self) -> None:
         inspect = contracts.capability({
             "id": "client.inspect", "kind": "observe", "authority": "client.ui.inspect", "executor": "inspect",
         })
@@ -231,6 +248,21 @@ class V6KernelTests(unittest.TestCase):
         self.assertEqual(agent.completion_gaps(), ["completion:goal_action"])
         agent.run("Act", [{"id": "send", "cap": "client.act", "completes_goal": True}])
         self.assertEqual(agent.completion_gaps(), [])
+
+        observed = kernel.Kernel(
+            authorities={"client.ui.inspect"}, completion_requirements={"goal_action"},
+        )
+        status = contracts.capability({
+            "id": "client.status", "kind": "observe", "authority": "client.ui.inspect",
+            "executor": "client.status", "mode": "read",
+            "proof": ["runtime.state.observed"],
+            "completion_proof": ["runtime.state.observed"],
+        })
+        observed.register(status, lambda _cap, _op: {
+            "ok": True, "observed": {"state": "open"}, "proof": ["runtime.state.observed"],
+        })
+        observed.run("Report status", [{"id": "status", "cap": "client.status", "completes_goal": True}])
+        self.assertEqual(observed.completion_gaps(), ["completion:goal_action"])
         restored = kernel.Kernel(
             authorities={"client.ui.inspect", "client.ui.control"},
             completion_requirements={"goal_action"},
@@ -239,6 +271,19 @@ class V6KernelTests(unittest.TestCase):
         restored.register(act, lambda _cap, _op: {"ok": True})
         restored.restore(agent.snapshot(agent.run("State", [])["state"]))
         self.assertEqual(restored.completion_gaps(), [])
+
+    def test_mutation_idempotency_key_replays_receipt_without_second_execution(self) -> None:
+        capability = contracts.capability({"id": "client.act", "kind": "act", "authority": "client.ui.control", "executor": "act", "mode": "write"})
+        calls = []
+        agent = kernel.Kernel(authorities={"client.ui.control"})
+        agent.register(capability, lambda _cap, operation: calls.append(operation["id"]) or {"ok": True, "observed": {"sent": True}})
+        result = agent.run("Send once", [
+            {"id": "send.first", "cap": "client.act", "idempotency_key": "message:laura:hi"},
+            {"id": "send.retry", "cap": "client.act", "idempotency_key": "message:laura:hi", "after": ["send.first"]},
+        ])
+        self.assertTrue(result["ok"])
+        self.assertEqual(calls, ["send.first"])
+        self.assertEqual([item["op"] for item in result["receipts"]], ["send.first", "send.retry"])
 
     def test_shared_cancellation_stops_queued_parallel_operations(self) -> None:
         capability = contracts.capability({"id": "repo.read", "kind": "observe", "authority": "repo.read", "executor": "read"})

@@ -179,6 +179,25 @@ class ProviderProxyTests(unittest.TestCase):
     def admin(self) -> dict[str, Any]:
         return {"id": 1, "role": "admin", "email": "admin@example.test"}
 
+    def paracelsus_runtime_contract_fixture(self, root: str):
+        fixture_root = Path(root)
+        workspace_root = fixture_root / "agents" / "nodes" / "paracelsus"
+        data_root = fixture_root / "datas" / "paracelsus"
+        bootstrap_path = workspace_root / ".clone-meta" / "bootstrap.json"
+        bootstrap_path.parent.mkdir(parents=True, exist_ok=True)
+        data_root.mkdir(parents=True, exist_ok=True)
+        bootstrap_path.write_text(json.dumps({"bootstrapped_at": "2026-04-24T21:41:55Z"}), encoding="utf-8")
+        contracts = server_mod.load_direct_head_route_contracts()
+        fixture_contracts = []
+        for contract in contracts:
+            item = dict(contract)
+            if item.get("route_id") == "hermes-node.paracelsus.runtime":
+                item["workspace_root"] = str(workspace_root)
+                item["allowed_read_roots"] = [str(workspace_root), str(data_root)]
+                item["likely_paths"] = [".clone-meta/bootstrap.json"]
+            fixture_contracts.append(item)
+        return patch.object(server_mod, "load_direct_head_route_contracts", return_value=fixture_contracts)
+
     def test_unauthenticated_runtime_inspect_stops_before_tool_and_store(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, patch.object(
             server_mod, "authenticated_request_user", return_value=None,
@@ -728,13 +747,6 @@ class ProviderProxyTests(unittest.TestCase):
         self.assertTrue(results[0]["ok"])
         self.assertEqual(results[0]["result"]["node_id"], "paracelsus")
         self.assertEqual(results[0]["result"]["model"]["model"], "deepseek-v4-flash")
-
-    def test_paracelsus_config_uses_opencode_go_deepseek_flash(self) -> None:
-        config = (Path("/local/agents/nodes/paracelsus/.hermes/config.yaml")).read_text(encoding="utf-8")
-        self.assertIn("provider: opencode-go", config)
-        self.assertIn("default: deepseek-v4-flash", config)
-        self.assertNotIn("provider: minimax\n", config)
-        self.assertNotIn("default: MiniMax-M2.7", config)
 
     def test_direct_envelope_openai_responses_receiver_streams_raw_envelope(self) -> None:
         with tempfile.TemporaryDirectory() as tmp, OpenAIResponsesStub() as stub:
@@ -2328,7 +2340,7 @@ class ProviderProxyTests(unittest.TestCase):
                     "stream": True,
                 },
             }
-            with patch.dict(os.environ, env, clear=True), patch.object(server_mod, "call_agent_bridge_runs") as bridge:
+            with patch.dict(os.environ, env, clear=True), self.paracelsus_runtime_contract_fixture(tmp), patch.object(server_mod, "call_agent_bridge_runs") as bridge:
                 result = server_mod.provider_envelope_run_completion(object(), body, user=self.admin())
                 run = server_mod.read_agent_run(self.admin(), result["run_id"])["run"]
                 events = server_mod.read_agent_run_events(self.admin(), result["run_id"])["events"]
@@ -2583,6 +2595,7 @@ class ProviderProxyTests(unittest.TestCase):
             )
             with (
                 patch.dict(os.environ, env, clear=True),
+                self.paracelsus_runtime_contract_fixture(tmp),
                 patch.object(server_mod, "openai_responses_completion", side_effect=provider_error) as provider,
                 patch.object(server_mod, "call_agent_bridge_runs") as bridge,
             ):

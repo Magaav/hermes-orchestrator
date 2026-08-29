@@ -244,6 +244,7 @@ Environment:
   HORC_PREPARED_DOCKER_IMAGE=horc/electron-builder-wine-nsis:jammy
   HORC_DOCKER_AMD64_PROBE_IMAGE=alpine:3.20
   HORC_FORCE_NPM_CI=1                          force Windows Docker npm reinstall
+  HORC_FORCE_NATIVE_REBUILD=1                  bypass the changed-path lane gate intentionally
   HORC_WIN_FAST_TASKS="test:windows-hot-ops test:android-connection-parser pack:win:x64"
                                                  override Windows fast npm tasks
   HORC_WIN_FAST_PACK=0                         skip electron-builder dir package in win-fast
@@ -1489,6 +1490,11 @@ build_windows_native_release() {
   local benchmark_started_ms
   local build_status=0
 
+  if [[ "${HORC_FORCE_NATIVE_REBUILD:-0}" != "1" ]]; then
+    python3 "$(repo_root)/tools/windows/select-native-evolution-lane.py" \
+      --target windows --require-native-build || exit $?
+  fi
+
   if [[ -z "${native_src}" ]]; then
     root="$(repo_root)"
     native_src="${root}/native/windows/src"
@@ -2072,6 +2078,10 @@ build_android_native_release() {
   local benchmark_started_ms
   local build_status=0
   local release_tasks=":app:assembleRelease"
+  if [[ "${HORC_FORCE_NATIVE_REBUILD:-0}" != "1" ]]; then
+    python3 "$(repo_root)/tools/windows/select-native-evolution-lane.py" \
+      --target android --require-native-build || exit $?
+  fi
   root="$(repo_root)"
   android_root="${android_root:-${root}/native/android}"
   release_script="${android_root}/scripts/release-android.js"

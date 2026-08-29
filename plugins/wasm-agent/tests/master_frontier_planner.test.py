@@ -76,6 +76,7 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         self.assertEqual(contract["intent"], "answer")
         self.assertEqual(contract["executor"], "provider_head")
         self.assertEqual(contract["evidence_floor"], "conceptual")
+        self.assertEqual(contract["finalization_contract"], "plain")
         self.assertEqual(contract["depth"]["level"], "normal")
         self.assertEqual(contract["recall_budget"]["mode"], "on_demand")
         self.assertNotIn("changed_files", contract["proof_required"])
@@ -103,6 +104,7 @@ class MasterFrontierPlannerTests(unittest.TestCase):
 
         self.assertEqual(contract["intent"], "capability_inquiry")
         self.assertEqual(contract["evidence_floor"], "route")
+        self.assertEqual(contract["finalization_contract"], "claim_bound")
         self.assertIn("kernel.inspect", contract["tools_first"])
 
     def test_client_action_requires_runtime_acknowledgement(self) -> None:
@@ -112,8 +114,17 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         contract = planner.task_contract(envelope)
 
         self.assertEqual(contract["intent"], "client_action")
+
+    def test_coarse_client_action_without_affirmative_mutation_becomes_runtime_inspection(self) -> None:
+        envelope = self.route_envelope("Inspect the current browser runtime. Do not navigate, click, type, or modify anything.")
+        envelope["objective_kind"] = "client_action"
+        envelope["route_contract"]["client_ui"] = {"operations": ["windows_browser_cdp_runtime_inspect"]}
+
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "runtime_inspection")
         self.assertEqual(contract["evidence_floor"], "runtime")
-        self.assertIn("client_ack", contract["proof_required"])
+        self.assertEqual(contract["proof_required"], ["route", "evidence", "answer"])
 
     def test_stale_model_decision_promotes_declared_client_action(self) -> None:
         envelope = self.route_envelope("open the browser widget")
@@ -205,6 +216,27 @@ class MasterFrontierPlannerTests(unittest.TestCase):
         self.assertEqual(contract["recall_budget"]["mode"], "bounded_recent")
         self.assertIn("code.memory.search", contract["tools_first"])
         self.assertIn("kernel.inspect", contract["tools_first"])
+
+    def test_self_critique_is_conceptual_and_needs_no_repository_receipt(self) -> None:
+        contract = planner.task_contract(self.route_envelope("critisize yourself"))
+
+        self.assertEqual(contract["intent"], "answer")
+        self.assertEqual(contract["evidence_floor"], "conceptual")
+        self.assertEqual(contract["depth"]["level"], "deep")
+        self.assertNotIn("completion_capabilities", contract)
+
+    def test_client_inventory_requires_generic_inspection_authority(self) -> None:
+        envelope = self.route_envelope(
+            "Inspect my Windows desktop and tell me which applications and controls are currently available"
+        )
+        envelope["route_contract"]["client_ui"] = {
+            "operations": ["windows_desktop_inspect", "command_status"]
+        }
+        contract = planner.task_contract(envelope)
+
+        self.assertEqual(contract["intent"], "client_action")
+        self.assertEqual(contract["completion_capabilities"], ["authority:client.ui.inspect"])
+        self.assertEqual(contract["finalization_contract"], "claim_bound")
 
     def test_repository_critique_uses_source_modality_even_when_runtime_is_available(self) -> None:
         contract = planner.task_contract(self.route_envelope(

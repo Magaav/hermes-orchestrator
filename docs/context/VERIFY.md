@@ -8,6 +8,7 @@ Run the smallest command that proves the claim being made. Record proof paths in
 ```bash
 python3 tools/context/check-context-sync.py
 python3 tools/context/check-harness-promises.py
+python3 tools/context/check-disk-health.py
 python3 tools/context/check-monolith-growth.py
 python3 tools/context/watch-loop-copilot.py
 make context-check
@@ -31,6 +32,29 @@ The harness promise registry validator reads
 ```text
 reports/context/latest/harness-promises-result.json
 ```
+
+The bounded disk-health promise is read-only by default and writes
+`reports/context/latest/disk-health-result.json`. The installed systemd timer
+runs `python3 tools/context/check-disk-health.py --cleanup` every minute.
+Cleanup is restricted to known WASM Agent temporary directories and Git
+`tmp_pack_*`/`tmp_obj_*` files older than five minutes. Git artifacts are never
+removed while a Git maintenance process is active. Usage at or above 85%
+fails the service and is recorded in the journal and JSON report.
+
+For installed Windows silent-update proof, start the watcher before activating
+the update and replace both placeholders with the promoted release values:
+
+```bash
+python3 tools/windows/prove-update-reconnect.py \
+  --expected-build EXPECTED_BUILD_ID \
+  --device-id EXPECTED_DEVICE_ID \
+  --require-transition
+```
+
+The bounded production receipt is written to
+`reports/windows/latest/windows-update-reconnect.json`. Without
+`--require-transition`, the result proves only that the build is currently
+connected, not that this watcher observed the update lifecycle.
 
 The monolith growth guard checks the current diff for frozen-monolith growth,
 new route branches in `static_server.py`, and oversized new source files. It
@@ -100,6 +124,32 @@ static/behavioral contract layer only. Run
 `python3 tools/context/prove-master-frontier-production.py --include-runtime`
 before claiming live node-brain availability.
 
+### Claim-risk-proof gate
+
+```bash
+python3 tools/context/prove-claim-risk-proof.py --self-test
+python3 plugins/wasm-agent/tests/claim_risk_proof_e2e.test.py
+```
+
+The campaign accepts one complete reference receipt and must reject stale
+evidence, missing evidence classes, threshold regression, artifact digest
+tampering, and an invalid matrix. Its report is
+`reports/context/latest/claim-risk-proof-result.json`. This is deterministic
+harness behavior proof; it is not live product or production-readiness proof.
+
+Apply the gate to the real Android voice readiness evidence with:
+
+```bash
+python3 tools/context/prove-android-voice-readiness-claim.py
+python3 plugins/wasm-agent/tests/android_voice_claim_gate_e2e.test.py
+```
+
+The first command is expected to return nonzero while the Android journey is
+stale, blocked, incomplete, or failing. Inspect
+`reports/context/latest/android-voice-claim-gate-result.json`; do not convert a
+correct rejection into a harness pass. The focused test proves that a complete
+fresh fixture passes and missing device metrics fail without defaults.
+
 ### WASM Agent product-readiness evaluation
 
 Validate the versioned schema and promise-composition contract without running
@@ -122,7 +172,6 @@ serially before normalization:
 
 ```bash
 python3 tools/context/evaluate-wasm-agent-product-readiness.py --run repository-agent
-python3 tools/context/evaluate-wasm-agent-product-readiness.py --run electron-browser-agent
 python3 tools/context/evaluate-wasm-agent-product-readiness.py --run android-voice-agent
 ```
 
@@ -147,7 +196,6 @@ Current bounded snapshot, run `readiness-20260820T145655Z`:
 | Journey | Status | Current measured evidence | Boundary |
 | --- | --- | --- | --- |
 | `repository-agent` | pass | 37,713 ms; GPT-5.6 Sol; 7 provider calls; exact 26,013 total tokens; 0 incorrect, unauthorized, or human-intervention actions; 100% required-metric coverage | Local disposable Git repository, not universal repository or production proof. |
-| `electron-browser-agent` | pass | 51,107 ms; production selected GPT-5.6 Luna; 3 provider calls; exact 33,431 total tokens; client acknowledgement and command receipt verified; 0 incorrect, unauthorized, or human-intervention actions; 100% required-metric coverage | Bounded production Browser-widget action, not Windows installer/login-persistence proof. |
 | `android-voice-agent` | fail | 76,745 ms; 21.43% required-metric coverage; requested threshold `0.999`; 11 required voice metrics missing | `android_device_missing` (`missing-access`); production authority and hot-shell preflight passed on installed Windows build `win-x64-20260815T212625Z`, but no authorized Android device was visible to ADB through the Windows bridge. No current wake/transcript/routing/avatar/acknowledgement readiness pass exists. Older Android results remain historical or stale. |
 
 The aggregate result is `evaluationCompleted: true`, `ready: false`. Do not use
@@ -159,13 +207,17 @@ device evidence must come through the installed Windows bridge.
 Run V6 checks from cheapest to most stateful:
 
 ```bash
+python3 plugins/wasm-agent/tests/master_frontier_v6_claim_gate.test.py
+python3 tools/context/prove-master-frontier-v6-procedure-memory.py
 python3 tools/context/prove-master-frontier-v6-kernel.py
 python3 tools/context/prove-master-frontier-v6-live-model.py
 python3 tools/context/prove-master-frontier-authenticated-canary.py --protocol v6
 python3 tools/context/prove-master-frontier-v6-client-ui.py
 ```
 
-The kernel proof is local static/behavioral evidence. The live-model proof uses
+The claim-gate fixture proves generic scope/evidence/proof binding and rejects
+the observed prompt-specific selector shape; it is not live-model or production
+proof. The kernel proof is local static/behavioral evidence. The live-model proof uses
 a real Codex head against a disposable Git repository; it is not cloud or
 installed-app proof. The authenticated V6 canary creates an objective-bound
 temporary non-admin identity, performs a read-only production source task, and
@@ -190,6 +242,12 @@ browser default; `?frontier=v5` or stored
 `v5` storage migrates to V6, and persisted runs keep their original protocol. The proofs
 do not cover every MCP transport/configuration or replace final Windows
 installer/login verification.
+
+The procedure-memory proof is local static and behavioral evidence. It proves
+two-run calibration followed by a zero-provider exact-repeat terminal read,
+with a fresh native receipt on every run and fail-closed scope/drift tests. It
+does not prove semantic paraphrase matching, write replay, production runtime
+activation, or a universal token reduction.
 
 The automatic watcher replays compact route/tool contract quests without
 provider calls. Static fixtures can promote only through L4. Independently
@@ -560,11 +618,41 @@ python3 tools/context/check-monolith-growth.py
 These are deterministic static/behavioral and recorded-provider replay proofs.
 They do not prove a live frontier provider or production behavior.
 
+## Master:frontier V6 trajectory dataflow
+
+```bash
+python3 tools/context/prove-master-frontier-v6-trajectory.py
+python3 plugins/wasm-agent/tests/master_frontier_v6_trajectory.test.py
+python3 plugins/wasm-agent/tests/master_frontier_v6_owned_controller.test.py
+python3 tools/context/check-harness-promises.py
+```
+
+The registered promise proves exact provider-context reconstruction,
+hash-chain integrity, structured recoverable failures, versioned tool argument
+normalization, route-owned execution profiles, checkpoint round-trip, fork
+lineage, and terminal replay. It is deterministic local static/behavioral
+evidence, not proof that the changed code is deployed at `wa.colmeio.com`.
+
 When provider access is configured, the separate dev-only source check is
 `python3 tools/context/run-master-frontier-v4-live.py`. Treat V4 as
 live-frontier verified only when
 `reports/master-frontier-v4/live-evaluation.json` has `ok: true`; this never
 constitutes production proof.
+
+## Master:frontier V6 CDP runtime inspection
+
+```bash
+python3 tools/context/prove-master-frontier-v6-cdp-runtime-inspection.py --self-test
+python3 tools/context/prove-master-frontier-v6-cdp-runtime-inspection.py
+```
+
+The self-test validates the compact result gate without contacting a client.
+The live command is stateful production proof: it creates a fresh empty
+Electron agent session, submits the fixed read-only objective, watches the
+persisted run, and requires runtime-inspection classification, one successful
+getter-safe runtime inspection, no browser mutation, typed runtime identity,
+at most three provider calls, and zero completion gaps. Its compact artifact is
+`reports/context/latest/master-frontier-v6-cdp-runtime-inspection.json`.
 
 ## Current Windows Installed Proof (2026-08-20)
 
